@@ -60,7 +60,7 @@ export class SlackRenderer extends BaseRenderer {
     }
   }
 
-  renderPlan(content: OutgoingMessage, _verbosity: DisplayVerbosity): RenderedMessage {
+  renderPlan(content: OutgoingMessage): RenderedMessage {
     const blocks = this.formatter.formatOutgoing(content)
     return {
       body: content.text ?? '',

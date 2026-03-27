@@ -20,7 +20,7 @@
     "url": "https://github.com/Open-ACP/slack-adapter"
   },
   "peerDependencies": {
-    "@openacp/plugin-sdk": "^1.0.0"
+    "@openacp/plugin-sdk": ">=2026.327.0"
   },
   "dependencies": {
     "@clack/prompts": "^1.1.0",
@@ -31,7 +31,7 @@
     "zod": "^3.25.0"
   },
   "devDependencies": {
-    "@openacp/plugin-sdk": "^1.0.0",
+    "@openacp/plugin-sdk": "file:../OpenACP/packages/plugin-sdk",
     "typescript": "^5.4.0",
     "vitest": "^3.0.0"
   }

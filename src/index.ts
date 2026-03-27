@@ -46,34 +46,38 @@ function createSlackPlugin(): OpenACPPlugin {
     async configure(ctx: InstallContext) {
       const { terminal, settings } = ctx
 
-      const choice = await terminal.select({
-        message: 'What to configure?',
-        options: [
-          { value: 'botToken', label: 'Change bot token' },
-          { value: 'appToken', label: 'Change app token' },
-          { value: 'channelId', label: 'Change channel ID' },
-          { value: 'done', label: 'Done' },
-        ],
-      })
+      while (true) {
+        const choice = await terminal.select({
+          message: 'What to configure?',
+          options: [
+            { value: 'botToken', label: 'Change bot token' },
+            { value: 'appToken', label: 'Change app token' },
+            { value: 'channelId', label: 'Change channel ID' },
+            { value: 'done', label: 'Done' },
+          ],
+        })
 
-      if (choice === 'botToken') {
-        const val = await terminal.text({
-          message: 'New bot token:',
-          validate: (v) => (!v.trim() ? 'Token cannot be empty' : undefined),
-        })
-        await settings.set('botToken', val.trim())
-        terminal.log.success('Bot token updated')
-      } else if (choice === 'appToken') {
-        const val = await terminal.text({
-          message: 'New app token:',
-          validate: (v) => (!v.trim() ? 'Token cannot be empty' : undefined),
-        })
-        await settings.set('appToken', val.trim())
-        terminal.log.success('App token updated')
-      } else if (choice === 'channelId') {
-        const val = await terminal.text({ message: 'New channel ID:' })
-        await settings.set('channelId', val.trim())
-        terminal.log.success('Channel ID updated')
+        if (choice === 'done') break
+
+        if (choice === 'botToken') {
+          const val = await terminal.text({
+            message: 'New bot token:',
+            validate: (v) => (!v.trim() ? 'Token cannot be empty' : undefined),
+          })
+          await settings.set('botToken', val.trim())
+          terminal.log.success('Bot token updated')
+        } else if (choice === 'appToken') {
+          const val = await terminal.text({
+            message: 'New app token:',
+            validate: (v) => (!v.trim() ? 'Token cannot be empty' : undefined),
+          })
+          await settings.set('appToken', val.trim())
+          terminal.log.success('App token updated')
+        } else if (choice === 'channelId') {
+          const val = await terminal.text({ message: 'New channel ID:' })
+          await settings.set('channelId', val.trim())
+          terminal.log.success('Channel ID updated')
+        }
       }
     },
 
