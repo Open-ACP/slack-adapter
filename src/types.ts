@@ -1,6 +1,18 @@
 // src/types.ts
 import { z } from "zod";
 
+/** Shared logger interface — used by adapter, event-router, and text-buffer */
+export interface Logger {
+  info(msg: string): void;
+  info(obj: unknown, msg?: string): void;
+  warn(msg: string): void;
+  warn(obj: unknown, msg?: string): void;
+  error(msg: string): void;
+  error(obj: unknown, msg?: string): void;
+  debug(msg: string): void;
+  debug(obj: unknown, msg?: string): void;
+}
+
 /**
  * Slack channel configuration schema.
  * Defined locally (was previously part of OpenACP core config).

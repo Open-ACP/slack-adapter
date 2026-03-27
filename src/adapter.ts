@@ -17,7 +17,7 @@ import type {
   IRenderer,
 } from "@openacp/plugin-sdk";
 import { SlackRenderer } from "./renderer.js";
-import type { SlackChannelConfig } from "./types.js";
+import type { SlackChannelConfig, Logger } from "./types.js";
 import type { SlackSessionMeta, SlackFileInfo } from "./types.js";
 import { SlackSendQueue } from "./send-queue.js";
 import { SlackFormatter } from "./formatter.js";
@@ -27,18 +27,6 @@ import { SlackEventRouter } from "./event-router.js";
 import { SlackTextBuffer } from "./text-buffer.js";
 import { toSlug } from "./slug.js";
 import { isAudioClip } from "./utils.js";
-
-/** Logger interface — passed from PluginContext.log */
-interface Logger {
-  info(obj: unknown, msg?: string): void;
-  info(msg: string): void;
-  warn(obj: unknown, msg?: string): void;
-  warn(msg: string): void;
-  error(obj: unknown, msg?: string): void;
-  error(msg: string): void;
-  debug(obj: unknown, msg?: string): void;
-  debug(msg: string): void;
-}
 
 /** Minimal interface for the core kernel, accessed via ctx.kernel */
 interface CoreKernel {
@@ -193,7 +181,8 @@ export class SlackAdapter extends MessagingAdapter {
                   users: userId,
                 });
                 // Notify user in DM with link to the new channel
-                const dmChannelId = (await this.webClient.conversations.open({ users: userId }))?.channel?.id;
+                const dmRes = await this.queue.enqueue<{ channel: { id: string } }>("conversations.open", { users: userId });
+                const dmChannelId = dmRes?.channel?.id;
                 if (dmChannelId) {
                   await this.queue.enqueue("chat.postMessage", {
                     channel: dmChannelId,
@@ -203,6 +192,18 @@ export class SlackAdapter extends MessagingAdapter {
               } catch (inviteErr) {
                 this.log.warn({ err: inviteErr, userId, channelId: meta.channelId }, "Failed to invite user to session channel");
               }
+
+              // Forward the original message to the new session
+              if (text) {
+                await this.core.handleMessage({
+                  channelId: 'slack',
+                  threadId: session.threadId,
+                  userId: userId,
+                  text: text,
+                });
+              }
+            } else {
+              this.log.warn({ sessionId: session.id, userId }, 'Session channel not ready yet, skipping user invite');
             }
           }
         } catch (err) {

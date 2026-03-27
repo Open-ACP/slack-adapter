@@ -1,15 +1,7 @@
 // src/event-router.ts
 import type { App } from "@slack/bolt";
-import type { SlackSessionMeta, SlackFileInfo } from "./types.js";
+import type { SlackSessionMeta, SlackFileInfo, Logger } from "./types.js";
 import type { SlackChannelConfig } from "./types.js";
-
-/** Logger interface accepted via constructor */
-interface Logger {
-  debug(obj: unknown, msg?: string): void;
-  debug(msg: string): void;
-  warn(obj: unknown, msg?: string): void;
-  warn(msg: string): void;
-}
 
 /** Subset of Bolt's message event fields used by the router */
 interface SlackMessageEvent {
@@ -53,7 +45,7 @@ export class SlackEventRouter implements ISlackEventRouter {
     private globalAllowedUserIds: string[] = [],
     logger?: Logger,
   ) {
-    this.log = logger ?? { debug() {}, warn() {} };
+    this.log = logger ?? { info() {}, warn() {}, error() {}, debug() {} };
   }
 
   private isAllowedUser(userId: string): boolean {

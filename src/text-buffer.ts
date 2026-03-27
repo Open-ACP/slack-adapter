@@ -3,14 +3,9 @@
 // This prevents the "many tiny messages" problem from streaming AI responses.
 
 import type { ISlackSendQueue } from "./send-queue.js";
+import type { Logger } from "./types.js";
 import { markdownToMrkdwn } from "./formatter.js";
 import { splitSafe } from "./utils.js";
-
-/** Logger interface accepted via constructor */
-interface Logger {
-  error(obj: unknown, msg?: string): void;
-  error(msg: string): void;
-}
 
 const FLUSH_IDLE_MS = 2000; // flush after 2s of no new chunks
 
@@ -28,7 +23,7 @@ export class SlackTextBuffer {
     private queue: ISlackSendQueue,
     logger?: Logger,
   ) {
-    this.log = logger ?? { error() {} };
+    this.log = logger ?? { info() {}, warn() {}, error() {}, debug() {} };
   }
 
   append(text: string): void {
