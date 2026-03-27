@@ -5,9 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": [
-    "dist"
-  ],
+  "files": ["dist"],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
@@ -15,19 +13,14 @@
     "test:watch": "vitest",
     "prepublishOnly": "npm run build"
   },
-  "keywords": [
-    "openacp",
-    "openacp-plugin",
-    "slack",
-    "adapter"
-  ],
+  "keywords": ["openacp", "openacp-plugin", "slack", "adapter"],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/EthanMiller0x/slack-plugin"
+    "url": "https://github.com/Open-ACP/slack-adapter"
   },
   "peerDependencies": {
-    "@openacp/cli": ">=0.6.0"
+    "@openacp/plugin-sdk": "^1.0.0"
   },
   "dependencies": {
     "@clack/prompts": "^1.1.0",
@@ -38,7 +31,7 @@
     "zod": "^3.25.0"
   },
   "devDependencies": {
-    "@openacp/cli": "file:../OpenACP",
+    "@openacp/plugin-sdk": "file:../OpenACP/packages/plugin-sdk",
     "typescript": "^5.4.0",
     "vitest": "^3.0.0"
   }

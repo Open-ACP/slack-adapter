@@ -1,13 +1,7 @@
-import { defineConfig } from "vitest/config";
-import { resolve } from "path";
+import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
-  resolve: {
-    alias: {
-      "@openacp/cli": resolve(__dirname, "node_modules/@openacp/cli/dist/index.js"),
-    },
-  },
   test: {
-    environment: "node",
+    include: ['src/**/*.test.ts'],
   },
-});
+})

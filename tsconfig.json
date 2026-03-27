@@ -11,10 +11,7 @@
     "skipLibCheck": true,
     "outDir": "dist",
     "rootDir": "src",
-    "types": ["node"],
-    "paths": {
-      "@openacp/cli": ["./node_modules/@openacp/cli/dist/index.d.ts"]
-    }
+    "types": ["node"]
   },
   "include": ["src"],
   "exclude": ["src/__tests__"]
