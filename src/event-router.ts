@@ -111,6 +111,13 @@ export class SlackEventRouter implements ISlackEventRouter {
         this.onNewSession(text, userId);
         return;
       }
+
+      // DM to bot -> auto-create new session
+      if (channelId.startsWith('D')) {
+        this.log.debug({ channelId, userId }, "DM received, creating new session");
+        this.onNewSession(text, userId);
+        return;
+      }
     });
   }
 }

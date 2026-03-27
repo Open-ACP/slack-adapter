@@ -28,48 +28,19 @@ function createSlackPlugin(): OpenACPPlugin {
             botToken: slackCfg.botToken,
             appToken: slackCfg.appToken,
             signingSecret: slackCfg.signingSecret ?? '',
-            channelId: slackCfg.channelId ?? '',
+            channelPrefix: slackCfg.channelPrefix ?? 'openacp',
+            allowedUserIds: slackCfg.allowedUserIds ?? [],
+            autoCreateSession: slackCfg.autoCreateSession ?? true,
+            ...(slackCfg.notificationChannelId ? { notificationChannelId: slackCfg.notificationChannelId } : {}),
           })
           terminal.log.success('Slack settings migrated from legacy config')
           return
         }
       }
 
-      // Interactive setup via terminal
-      terminal.note(
-        '1. Create a Slack App at https://api.slack.com/apps\n' +
-        '2. Enable Socket Mode and get an App-Level Token\n' +
-        '3. Add Bot Token Scopes: chat:write, channels:history, groups:history, files:write\n' +
-        '4. Install app to workspace and copy the Bot User OAuth Token',
-        'Slack Setup',
-      )
-
-      const botToken = await terminal.text({
-        message: 'Bot User OAuth Token (xoxb-...):',
-        validate: (v) => (!v.trim() ? 'Token cannot be empty' : undefined),
-      })
-
-      const appToken = await terminal.text({
-        message: 'App-Level Token (xapp-...):',
-        validate: (v) => (!v.trim() ? 'Token cannot be empty' : undefined),
-      })
-
-      const signingSecret = await terminal.text({
-        message: 'Signing Secret:',
-        validate: (v) => (!v.trim() ? 'Signing secret cannot be empty' : undefined),
-      })
-
-      const channelId = await terminal.text({
-        message: 'Default channel ID (optional):',
-      })
-
-      await settings.setAll({
-        botToken: botToken.trim(),
-        appToken: appToken.trim(),
-        signingSecret: signingSecret.trim(),
-        channelId: channelId.trim() || '',
-      })
-      terminal.log.success('Slack settings saved')
+      // Interactive setup with manifest
+      const { setupSlack } = await import('./setup.js')
+      await setupSlack(ctx)
     },
 
     async configure(ctx: InstallContext) {
@@ -115,6 +86,7 @@ function createSlackPlugin(): OpenACPPlugin {
 
     async setup(ctx: PluginContext) {
       const config = ctx.pluginConfig as Record<string, unknown>
+      ctx.log.debug(`Slack plugin config check: keys=${Object.keys(config).join(',')}, hasBotToken=${!!config.botToken}`)
       if (!config.botToken || !config.appToken) {
         ctx.log.info('Slack disabled (missing botToken or appToken)')
         return

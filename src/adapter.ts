@@ -177,13 +177,36 @@ export class SlackAdapter extends MessagingAdapter {
       },
       this.botUserId,
       this.slackConfig.notificationChannelId,
-      // onNewSession: reply with guidance when user messages the notification channel
-      async (_text, _userId) => {
-        if (this.slackConfig.notificationChannelId) {
-          await this.queue.enqueue("chat.postMessage", {
-            channel: this.slackConfig.notificationChannelId,
-            text: "\u{1F4AC} To start a new session, use the `/openacp-new` slash command in any channel.",
-          }).catch((err: unknown) => this.log.warn({ err }, "Failed to send onNewSession reply"));
+      // onNewSession: create a new session with a private channel
+      async (text, userId) => {
+        try {
+          const session = await this.core.handleNewSession("slack", undefined, undefined, { createThread: true });
+          if (session.threadId) {
+            this.log.debug({ sessionId: session.id, threadId: session.threadId }, "New session created from DM/notification");
+
+            // Invite the user who triggered the session into the new channel
+            const meta = this.sessions.get(session.id);
+            if (meta && userId) {
+              try {
+                await this.queue.enqueue("conversations.invite", {
+                  channel: meta.channelId,
+                  users: userId,
+                });
+                // Notify user in DM with link to the new channel
+                const dmChannelId = (await this.webClient.conversations.open({ users: userId }))?.channel?.id;
+                if (dmChannelId) {
+                  await this.queue.enqueue("chat.postMessage", {
+                    channel: dmChannelId,
+                    text: `✅ New session started! Continue the conversation in <#${meta.channelId}>`,
+                  });
+                }
+              } catch (inviteErr) {
+                this.log.warn({ err: inviteErr, userId, channelId: meta.channelId }, "Failed to invite user to session channel");
+              }
+            }
+          }
+        } catch (err) {
+          this.log.error({ err, userId }, "Failed to create new session");
         }
       },
       this.slackConfig,
