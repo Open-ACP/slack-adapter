@@ -107,7 +107,7 @@ describe("SlackEventRouter", () => {
 
     await app._trigger("message", { message: { channel: "NOTIF", user: "U_ANYONE", text: "hello" } });
 
-    expect(onNewSession).toHaveBeenCalledWith("hello", "U_ANYONE");
+    expect(onNewSession).toHaveBeenCalledWith("hello", "U_ANYONE", "NOTIF");
   });
 
   it("routes to onIncoming when sessionLookup returns a match", async () => {
@@ -177,7 +177,7 @@ describe("SlackEventRouter", () => {
 
     await app._trigger("message", { message: { channel: "NOTIF_CHAN", user: "U1", text: "new task" } });
 
-    expect(onNewSession).toHaveBeenCalledWith("new task", "U1");
+    expect(onNewSession).toHaveBeenCalledWith("new task", "U1", "NOTIF_CHAN");
     expect(onIncoming).not.toHaveBeenCalled();
   });
 
@@ -201,7 +201,7 @@ describe("SlackEventRouter", () => {
     expect(onNewSession).not.toHaveBeenCalled();
 
     await app._trigger("message", { message: { channel: "NOTIF", user: "U_GLOBAL_ALLOWED", text: "hello" } });
-    expect(onNewSession).toHaveBeenCalledWith("hello", "U_GLOBAL_ALLOWED");
+    expect(onNewSession).toHaveBeenCalledWith("hello", "U_GLOBAL_ALLOWED", "NOTIF");
   });
 
   it("prefers Slack-specific list over global list when both are set", async () => {
@@ -224,7 +224,7 @@ describe("SlackEventRouter", () => {
     expect(onNewSession).not.toHaveBeenCalled();
 
     await app._trigger("message", { message: { channel: "NOTIF", user: "U_SLACK_ONLY", text: "hello" } });
-    expect(onNewSession).toHaveBeenCalledWith("hello", "U_SLACK_ONLY");
+    expect(onNewSession).toHaveBeenCalledWith("hello", "U_SLACK_ONLY", "NOTIF");
   });
 
   it("allows all users when both Slack and global lists are empty", async () => {
@@ -244,6 +244,6 @@ describe("SlackEventRouter", () => {
     router.register(app as any);
 
     await app._trigger("message", { message: { channel: "NOTIF", user: "U_ANYONE", text: "hello" } });
-    expect(onNewSession).toHaveBeenCalledWith("hello", "U_ANYONE");
+    expect(onNewSession).toHaveBeenCalledWith("hello", "U_ANYONE", "NOTIF");
   });
 });

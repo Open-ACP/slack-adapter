@@ -134,13 +134,35 @@ export class SlackAdapter extends ChannelAdapter<OpenACPCore> {
       },
       this.botUserId,
       this.slackConfig.notificationChannelId,
-      // onNewSession: reply with guidance when user messages the notification channel
-      async (_text, _userId) => {
-        if (this.slackConfig.notificationChannelId) {
-          await this.queue.enqueue("chat.postMessage", {
-            channel: this.slackConfig.notificationChannelId,
-            text: "💬 To start a new session, use the `/openacp-new` slash command in any channel.",
-          }).catch((err: unknown) => log.warn({ err }, "Failed to send onNewSession reply"));
+      // onNewSession: create a new session channel and reply with the link
+      async (text, userId, fromChannelId) => {
+        try {
+          const session = await this.core.handleNewSession("slack", undefined, undefined, { createThread: true });
+          const meta = this.sessions.get(session.id);
+          if (meta) {
+            // Invite the triggering user to the private session channel
+            await this.queue.enqueue("conversations.invite", {
+              channel: meta.channelId,
+              users: userId,
+            }).catch((err: unknown) => log.warn({ err }, "Failed to invite user to session channel"));
+
+            await this.queue.enqueue("chat.postMessage", {
+              channel: fromChannelId,
+              text: `✅ New session started! Continue the conversation in <#${meta.channelId}>`,
+            }).catch((err: unknown) => log.warn({ err }, "Failed to send new-session reply"));
+
+            // Route initial message to the new session if non-empty
+            if (text.trim()) {
+              this.core.handleMessage({
+                channelId: "slack",
+                threadId: meta.channelSlug,
+                userId,
+                text,
+              }).catch((err) => log.error({ err }, "handleMessage error for initial message"));
+            }
+          }
+        } catch (err) {
+          log.error({ err }, "Failed to create session from notification/DM");
         }
       },
       this.slackConfig,
