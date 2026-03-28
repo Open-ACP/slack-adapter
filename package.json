@@ -5,7 +5,9 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
@@ -13,7 +15,12 @@
     "test:watch": "vitest",
     "prepublishOnly": "npm run build"
   },
-  "keywords": ["openacp", "openacp-plugin", "slack", "adapter"],
+  "keywords": [
+    "openacp",
+    "openacp-plugin",
+    "slack",
+    "adapter"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -33,6 +40,7 @@
   "packageManager": "pnpm@9.15.0",
   "devDependencies": {
     "@openacp/plugin-sdk": ">=2026.327.0",
+    "@types/node": "^25.5.0",
     "typescript": "^5.4.0",
     "vitest": "^3.0.0"
   }

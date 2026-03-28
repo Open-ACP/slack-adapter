@@ -3,12 +3,15 @@ import {
 } from '@openacp/plugin-sdk'
 import type {
   RenderedMessage,
-  RenderedPermission,
   OutgoingMessage,
   PermissionRequest,
   NotificationMessage,
   DisplayVerbosity,
 } from '@openacp/plugin-sdk'
+
+type RenderedPermission = RenderedMessage & {
+  actions: Array<{ id: string; label: string; isAllow: boolean }>
+}
 import { SlackFormatter, markdownToMrkdwn } from './formatter.js'
 
 /**

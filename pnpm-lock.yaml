@@ -30,6 +30,9 @@ importers:
       '@openacp/plugin-sdk':
         specifier: '>=2026.327.0'
         version: 2026.328.2(@openacp/cli@2026.328.2(@types/node@25.5.0))
+      '@types/node':
+        specifier: ^25.5.0
+        version: 25.5.0
       typescript:
         specifier: ^5.4.0
         version: 5.9.3
