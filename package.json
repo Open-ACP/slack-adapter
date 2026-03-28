@@ -30,6 +30,7 @@
     "p-queue": "^9.1.0",
     "zod": "^3.25.0"
   },
+  "packageManager": "pnpm@9.15.0",
   "devDependencies": {
     "@openacp/plugin-sdk": ">=2026.327.0",
     "typescript": "^5.4.0",
