@@ -1,11 +1,11 @@
-# @openacp/adapter-slack
+# @openacp/slack-adapter
 
 Slack messaging platform adapter plugin for [OpenACP](https://github.com/Open-ACP/OpenACP).
 
 ## Installation
 
 ```bash
-openacp plugin install @openacp/adapter-slack
+openacp plugin install @openacp/slack-adapter
 ```
 
 ## Configuration
@@ -17,7 +17,7 @@ Add to your `~/.openacp/config.json`:
   "channels": {
     "slack": {
       "enabled": true,
-      "adapter": "@openacp/adapter-slack",
+      "adapter": "@openacp/slack-adapter",
       "botToken": "xoxb-...",
       "appToken": "xapp-...",
       "signingSecret": "...",
