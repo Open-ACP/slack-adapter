@@ -110,6 +110,18 @@ describe("SlackModalHandler.buildOutputModeModal", () => {
     expect(meta.sessionId).toBeUndefined();
   });
 
+  it("encodes channelId in private_metadata when provided", () => {
+    const modal = handler.buildOutputModeModal("medium", "sess-1", "C123456");
+    const meta = JSON.parse(modal.private_metadata);
+    expect(meta.channelId).toBe("C123456");
+  });
+
+  it("encodes undefined channelId when not provided", () => {
+    const modal = handler.buildOutputModeModal("medium", "sess-1");
+    const meta = JSON.parse(modal.private_metadata);
+    expect(meta.channelId).toBeUndefined();
+  });
+
   it("mode options include description text", () => {
     const modal = handler.buildOutputModeModal("medium");
     const modeBlock = modal.blocks.find(
@@ -127,16 +139,18 @@ describe("SlackModalHandler.buildOutputModeModal", () => {
 describe("SlackModalHandler.parseSubmission", () => {
   function makeViewState(mode: string, scope: string) {
     return {
-      output_mode_block: {
-        output_mode_action: {
-          type: "radio_buttons",
-          selected_option: { value: mode },
+      values: {
+        output_mode_block: {
+          output_mode_action: {
+            type: "radio_buttons",
+            selected_option: { value: mode },
+          },
         },
-      },
-      output_scope_block: {
-        output_scope_action: {
-          type: "static_select",
-          selected_option: { value: scope },
+        output_scope_block: {
+          output_scope_action: {
+            type: "static_select",
+            selected_option: { value: scope },
+          },
         },
       },
     };

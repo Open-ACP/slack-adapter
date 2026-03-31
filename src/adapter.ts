@@ -71,6 +71,7 @@ export class SlackAdapter extends MessagingAdapter {
   private outputModeResolver = new OutputModeResolver();
   private modalHandler = new SlackModalHandler();
   private sessionTrackers = new Map<string, SlackActivityTracker>();
+  private adapterDefaultOutputMode: OutputMode | undefined;
   private botUserId = "";
   private slackConfig: SlackChannelConfig;
   private fileService!: FileServiceInterface;
@@ -137,13 +138,15 @@ export class SlackAdapter extends MessagingAdapter {
       await ack();
 
       const args = command.text.trim().toLowerCase();
+      const channelId = command.channel_id;
 
       // Inline shortcut: /outputmode low|medium|high
       if (args === "low" || args === "medium" || args === "high") {
-        const channelId = command.channel_id;
         const found = this.findSessionByChannel(channelId);
         if (found) {
           await this.core.sessionManager.patchRecord(found.sessionId, { outputMode: args });
+          const tracker = this.sessionTrackers.get(found.sessionId);
+          if (tracker) tracker.setOutputMode(args as OutputMode);
         }
         await client.chat.postEphemeral({
           channel: channelId,
@@ -154,15 +157,10 @@ export class SlackAdapter extends MessagingAdapter {
       }
 
       // Open modal
-      const found = this.findSessionByChannel(command.channel_id);
-      const currentMode = this.outputModeResolver.resolve(
-        this.core.configManager as any,
-        "slack",
-        found?.sessionId,
-        this.core.sessionManager as any,
-      );
+      const found = this.findSessionByChannel(channelId);
+      const currentMode = this.resolveOutputMode(found?.sessionId);
 
-      const view = this.modalHandler.buildOutputModeModal(currentMode, found?.sessionId);
+      const view = this.modalHandler.buildOutputModeModal(currentMode, found?.sessionId, channelId);
       await client.views.open({
         trigger_id: command.trigger_id,
         view: view as any,
@@ -170,17 +168,38 @@ export class SlackAdapter extends MessagingAdapter {
     });
 
     // Handle /outputmode modal submission
-    this.app.view("output_mode_modal", async ({ ack, view }) => {
+    this.app.view("output_mode_modal", async ({ ack, view, body }) => {
       await ack();
       const metadata = JSON.parse(view.private_metadata || "{}");
       const result = this.modalHandler.parseSubmission(view.state, metadata.sessionId);
 
       if (result.scope === "session" && result.sessionId) {
+        // Session scope: update this session's record and tracker
         await this.core.sessionManager.patchRecord(result.sessionId, { outputMode: result.mode });
+        const tracker = this.sessionTrackers.get(result.sessionId);
+        if (tracker) tracker.setOutputMode(result.mode);
       } else {
-        // For adapter-level, we can't save config in external plugin context.
-        // Post ephemeral to confirm (adapter default changes require config save)
-        this.log.info({ mode: result.mode, scope: result.scope }, "Output mode changed");
+        // Adapter scope: set in-memory default + update all existing trackers
+        this.adapterDefaultOutputMode = result.mode;
+        for (const tracker of this.sessionTrackers.values()) {
+          tracker.setOutputMode(result.mode);
+        }
+        this.log.info({ mode: result.mode }, "Adapter output mode changed");
+      }
+
+      // Post ephemeral confirmation
+      if (metadata.channelId) {
+        const modeLabel: Record<string, string> = { low: "🔇 Low", medium: "📊 Medium", high: "🔍 High" };
+        const scopeLabel = result.scope === "session" ? "this session" : "all sessions";
+        try {
+          await this.app.client.chat.postEphemeral({
+            channel: metadata.channelId,
+            user: body.user.id,
+            text: `Output mode set to *${modeLabel[result.mode] ?? result.mode}* for ${scopeLabel}`,
+          });
+        } catch {
+          // Non-critical
+        }
       }
     });
 
@@ -477,10 +496,8 @@ export class SlackAdapter extends MessagingAdapter {
     if (buf) { buf.destroy(); this.textBuffers.delete(sessionId); }
   }
 
-  private _sessionMetas = new Map<string, SlackSessionMeta>();
-
   private getSessionMeta(sessionId: string): SlackSessionMeta | undefined {
-    return this._sessionMetas.get(sessionId);
+    return this.sessions.get(sessionId);
   }
 
   private getTextBuffer(sessionId: string, channelId: string): SlackTextBuffer {
@@ -492,14 +509,22 @@ export class SlackAdapter extends MessagingAdapter {
     return buf;
   }
 
+  private resolveOutputMode(sessionId?: string): OutputMode {
+    // 1. Session record (most specific — set via patchRecord)
+    if (sessionId) {
+      const record = this.core.sessionManager.getSessionRecord(sessionId) as any;
+      const sessionMode = record?.outputMode as OutputMode | undefined;
+      if (sessionMode) return sessionMode;
+    }
+    // 2. Adapter default (in-memory, set by /outputmode with scope=adapter)
+    if (this.adapterDefaultOutputMode) return this.adapterDefaultOutputMode;
+    // 3. Global config (no session context)
+    return this.outputModeResolver.resolve(this.core.configManager as any, "slack");
+  }
+
   private getOrCreateTracker(sessionId: string, channelId: string): SlackActivityTracker {
     let tracker = this.sessionTrackers.get(sessionId);
-    const mode = this.outputModeResolver.resolve(
-      this.core.configManager as any,
-      "slack",
-      sessionId,
-      this.core.sessionManager as any,
-    );
+    const mode = this.resolveOutputMode(sessionId);
     if (!tracker) {
       tracker = new SlackActivityTracker({
         channelId,
@@ -524,19 +549,11 @@ export class SlackAdapter extends MessagingAdapter {
   }
 
   async sendMessage(sessionId: string, content: OutgoingMessage): Promise<void> {
-    const meta = this.sessions.get(sessionId);
-    if (!meta) {
+    if (!this.sessions.has(sessionId)) {
       this.log.warn({ sessionId }, "No Slack channel for session, skipping message");
       return;
     }
-
-    // Store meta per-session so concurrent calls for different sessions don't overwrite each other
-    this._sessionMetas.set(sessionId, meta);
-    try {
-      await super.sendMessage(sessionId, content);
-    } finally {
-      this._sessionMetas.delete(sessionId);
-    }
+    await super.sendMessage(sessionId, content);
   }
 
   // --- Handler overrides (dispatched by base class) ---
@@ -742,7 +759,7 @@ export class SlackAdapter extends MessagingAdapter {
       });
       const ts = (result as { ts?: string })?.ts;
       if (ts) {
-        this.permissionHandler.trackPendingMessage(request.id, meta.channelId, ts);
+        this.permissionHandler.trackPendingMessage(request.id, meta.channelId, ts, request.options);
       }
     } catch (err) {
       this.log.error({ err, sessionId }, "Failed to post Slack permission request");

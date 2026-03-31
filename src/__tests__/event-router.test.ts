@@ -227,6 +227,20 @@ describe("SlackEventRouter", () => {
     expect(onNewSession).toHaveBeenCalledWith("hello", "U_SLACK_ONLY");
   });
 
+  it("ignores thread replies", async () => {
+    const onIncoming = vi.fn();
+    const onNewSession = vi.fn();
+    const sessionLookup = vi.fn().mockReturnValue({ channelId: "C123", channelSlug: "openacp-session-abc1" });
+    const router = new SlackEventRouter(sessionLookup, onIncoming, "BOT1", "NOTIF", onNewSession, makeConfig());
+    const app = createMockApp();
+    router.register(app as any);
+
+    await app._trigger("message", { message: { channel: "C123", user: "U1", text: "reply in thread", thread_ts: "1234567890.123456" } });
+
+    expect(onIncoming).not.toHaveBeenCalled();
+    expect(onNewSession).not.toHaveBeenCalled();
+  });
+
   it("allows all users when both Slack and global lists are empty", async () => {
     const onIncoming = vi.fn();
     const onNewSession = vi.fn();

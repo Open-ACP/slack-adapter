@@ -49,7 +49,8 @@ export class SlackModalHandler {
    */
   buildOutputModeModal(
     currentMode: OutputMode,
-    sessionId?: string
+    sessionId?: string,
+    channelId?: string,
   ): ModalView {
     const modeInitialOption = MODE_OPTIONS.find((o) => o.value === currentMode);
     const scopeInitialValue = sessionId !== undefined ? "session" : "adapter";
@@ -63,7 +64,7 @@ export class SlackModalHandler {
       title: { type: "plain_text", text: "Output Mode" },
       submit: { type: "plain_text", text: "Apply" },
       close: { type: "plain_text", text: "Cancel" },
-      private_metadata: JSON.stringify({ sessionId }),
+      private_metadata: JSON.stringify({ sessionId, channelId }),
       blocks: [
         {
           type: "input",
@@ -120,10 +121,11 @@ export class SlackModalHandler {
    * typed SubmissionResult.
    */
   parseSubmission(viewState: any, sessionId?: string): SubmissionResult {
+    const values = viewState?.values ?? viewState;
     const mode: OutputMode =
-      viewState.output_mode_block?.output_mode_action?.selected_option?.value;
+      values.output_mode_block?.output_mode_action?.selected_option?.value;
     const scope: "session" | "adapter" =
-      viewState.output_scope_block?.output_scope_action?.selected_option?.value;
+      values.output_scope_block?.output_scope_action?.selected_option?.value;
 
     return {
       mode,

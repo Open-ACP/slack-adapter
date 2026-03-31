@@ -132,6 +132,34 @@ describe("SlackPermissionHandler", () => {
     }));
   });
 
+  it("uses isAllow from tracked options (not heuristic) when options are stored", async () => {
+    const onResponse = vi.fn();
+    const queue = makeMockQueue();
+    const handler = new SlackPermissionHandler(queue as any, onResponse);
+    const app = createMockApp();
+    handler.register(app as any);
+
+    // Track with options where "custom-id" is isAllow=false (heuristic would say true if name contained "allow")
+    handler.trackPendingMessage("req-opt", "C100", "ts-100", [
+      { id: "custom-id", label: "Allow-ish", isAllow: false },
+    ]);
+
+    await app._triggerAction({
+      ack: vi.fn().mockResolvedValue(undefined),
+      action: { value: "req-opt:custom-id" },
+      body: {
+        channel: { id: "C100" },
+        message: { ts: "ts-100" },
+        user: { id: "U1", name: "alice" },
+      },
+    });
+
+    // Despite "allow" appearing in label, isAllow=false from stored options takes precedence
+    expect(queue.enqueue).toHaveBeenCalledWith("chat.update", expect.objectContaining({
+      text: "Permission Denied",
+    }));
+  });
+
   it("handles missing message in body gracefully (no crash when body.message is undefined)", async () => {
     const onResponse = vi.fn();
     const queue = makeMockQueue();
