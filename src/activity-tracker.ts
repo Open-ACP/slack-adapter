@@ -266,12 +266,16 @@ export class SlackActivityTracker {
     const blocks = this.renderer.renderToolCard(snapshot);
 
     if (this.turn.currentToolCardTs) {
-      await this.queue.enqueue("chat.update", {
-        channel: this.channelId,
-        ts: this.turn.currentToolCardTs,
-        blocks,
-        text: "Tool details",
-      });
+      try {
+        await this.queue.enqueue("chat.update", {
+          channel: this.channelId,
+          ts: this.turn.currentToolCardTs,
+          blocks,
+          text: "Tool details",
+        });
+      } catch {
+        // Non-critical: tool card update failed, skip
+      }
     } else {
       const result = await this.queue.enqueue<{ ok: boolean; ts: string }>(
         "chat.postMessage",
@@ -290,19 +294,36 @@ export class SlackActivityTracker {
     if (!this.turn) return;
 
     const snapshot = { ...this.lastSnapshot, allComplete: isComplete };
-    let blocks: KnownBlock[];
+    const blocks: KnownBlock[] =
+      this.outputMode === "low"
+        ? this.renderer.renderMainMessageLow(isComplete)
+        : this.renderer.renderMainMessage(snapshot, isComplete);
 
-    if (this.outputMode === "low") {
-      blocks = this.renderer.renderMainMessageLow(isComplete);
-    } else {
-      blocks = this.renderer.renderMainMessage(snapshot, isComplete);
+    try {
+      await this.queue.enqueue("chat.update", {
+        channel: this.channelId,
+        ts: this.turn.mainMessageTs,
+        blocks,
+        text: isComplete ? "Done" : "Processing...",
+      });
+    } catch {
+      // Fallback: post new message if edit fails (e.g., message deleted)
+      try {
+        const result = await this.queue.enqueue<{ ts?: string }>(
+          "chat.postMessage",
+          {
+            channel: this.channelId,
+            blocks,
+            text: isComplete ? "Done" : "Processing...",
+          },
+        );
+        if (result?.ts) {
+          this.turn.mainMessageTs = result.ts;
+          this.turn.threadTs = result.ts;
+        }
+      } catch {
+        // Give up silently
+      }
     }
-
-    await this.queue.enqueue("chat.update", {
-      channel: this.channelId,
-      ts: this.turn.mainMessageTs,
-      blocks,
-      text: isComplete ? "Done" : "Processing...",
-    });
   }
 }

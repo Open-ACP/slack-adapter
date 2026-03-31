@@ -6,12 +6,20 @@ type KnownBlock = types.KnownBlock;
 
 // ─── Block Kit helpers ──────────────────────────────────────────────────────
 
+const BLOCK_TEXT_LIMIT = 3000;
+
+function truncate(text: string): string {
+  return text.length > BLOCK_TEXT_LIMIT
+    ? text.slice(0, BLOCK_TEXT_LIMIT - 3) + "..."
+    : text;
+}
+
 function section(text: string): KnownBlock {
-  return { type: "section", text: { type: "mrkdwn", text } };
+  return { type: "section", text: { type: "mrkdwn", text: truncate(text) } };
 }
 
 function ctx(text: string): KnownBlock {
-  return { type: "context", elements: [{ type: "mrkdwn", text }] };
+  return { type: "context", elements: [{ type: "mrkdwn", text: truncate(text) }] };
 }
 
 // ─── Status icons ───────────────────────────────────────────────────────────
