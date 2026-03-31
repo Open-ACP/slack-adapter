@@ -52,15 +52,31 @@ export class SlackPermissionHandler implements ISlackPermissionHandler {
         // Remove from pending tracking since the user has responded
         this.pendingMessages.delete(requestId);
 
-        // Update message to remove action buttons and show confirmation
-        const message = body.message;
-        if (message) {
+        // Update message: remove buttons, show resolved state
+        const isAllow = optionId.includes("allow") || optionId.includes("yes");
+        const icon = isAllow ? "✅" : "❌";
+        const label = isAllow ? "Allowed" : "Denied";
+        const userName = body.user?.name ?? body.user?.id ?? "unknown";
+
+        try {
           await this.queue.enqueue("chat.update", {
-            channel: body.channel?.id ?? "",
-            ts: message.ts,
-            text: `\u2705 Permission response: *${optionId}*`,
-            blocks: [],
+            channel: body.channel?.id,
+            ts: body.message?.ts,
+            blocks: [
+              {
+                type: "context",
+                elements: [
+                  {
+                    type: "mrkdwn",
+                    text: `🔐 Permission — ${icon} ${label} by @${userName}`,
+                  },
+                ],
+              },
+            ],
+            text: `Permission ${label}`,
           });
+        } catch (err) {
+          // Non-critical: log but don't fail
         }
       }
     );

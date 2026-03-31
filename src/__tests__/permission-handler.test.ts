@@ -70,12 +70,48 @@ describe("SlackPermissionHandler", () => {
       body: {
         channel: { id: "C456" },
         message: { ts: "9876543210.654321" },
+        user: { id: "U123", name: "bob" },
       },
     });
 
     expect(queue.enqueue).toHaveBeenCalledWith("chat.update", expect.objectContaining({
       channel: "C456",
       ts: "9876543210.654321",
+    }));
+  });
+
+  it("updates message with resolved state after button click", async () => {
+    const onResponse = vi.fn();
+    const queue = makeMockQueue();
+    const handler = new SlackPermissionHandler(queue as any, onResponse);
+    const app = createMockApp();
+    handler.register(app as any);
+
+    await app._triggerAction({
+      ack: vi.fn().mockResolvedValue(undefined),
+      action: { value: "req-999:allow" },
+      body: {
+        channel: { id: "C999" },
+        message: { ts: "1111111111.000001" },
+        user: { id: "U42", name: "alice" },
+      },
+    });
+
+    expect(queue.enqueue).toHaveBeenCalledWith("chat.update", expect.objectContaining({
+      channel: "C999",
+      ts: "1111111111.000001",
+      text: "Permission Allowed",
+      blocks: [
+        expect.objectContaining({
+          type: "context",
+          elements: [
+            expect.objectContaining({
+              type: "mrkdwn",
+              text: expect.stringContaining("Allowed"),
+            }),
+          ],
+        }),
+      ],
     }));
   });
 
@@ -109,10 +145,14 @@ describe("SlackPermissionHandler", () => {
       body: {
         channel: { id: "C789" },
         message: undefined,
+        user: { id: "U1", name: "anon" },
       },
     })).resolves.not.toThrow();
 
     expect(onResponse).toHaveBeenCalledWith("req-xyz", "allow");
-    expect(queue.enqueue).not.toHaveBeenCalled();
+    // chat.update is still attempted (ts will be undefined); errors are caught silently
+    expect(queue.enqueue).toHaveBeenCalledWith("chat.update", expect.objectContaining({
+      channel: "C789",
+    }));
   });
 });
