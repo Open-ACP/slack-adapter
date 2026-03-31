@@ -4,6 +4,7 @@ import { App } from "@slack/bolt";
 import { WebClient } from "@slack/web-api";
 import {
   MessagingAdapter,
+  OutputModeResolver,
 } from "@openacp/plugin-sdk";
 import type {
   MessagingAdapterConfig,
@@ -15,6 +16,10 @@ import type {
   FileServiceInterface,
   DisplayVerbosity,
   IRenderer,
+  OutputMode,
+  ToolCallMeta,
+  ToolUpdateMeta,
+  ViewerLinks,
 } from "@openacp/plugin-sdk";
 import { SlackRenderer } from "./renderer.js";
 import type { SlackChannelConfig, Logger } from "./types.js";
@@ -25,6 +30,7 @@ import { SlackChannelManager } from "./channel-manager.js";
 import { SlackPermissionHandler } from "./permission-handler.js";
 import { SlackEventRouter } from "./event-router.js";
 import { SlackTextBuffer } from "./text-buffer.js";
+import { SlackActivityTracker } from "./activity-tracker.js";
 import { toSlug } from "./slug.js";
 import { isAudioClip } from "./utils.js";
 
@@ -61,6 +67,8 @@ export class SlackAdapter extends MessagingAdapter {
   private eventRouter!: SlackEventRouter;
   private sessions = new Map<string, SlackSessionMeta>();
   private textBuffers = new Map<string, SlackTextBuffer>();
+  private outputModeResolver = new OutputModeResolver();
+  private sessionTrackers = new Map<string, SlackActivityTracker>();
   private botUserId = "";
   private slackConfig: SlackChannelConfig;
   private fileService!: FileServiceInterface;
@@ -333,6 +341,17 @@ export class SlackAdapter extends MessagingAdapter {
   }
 
   async stop(): Promise<void> {
+    // Cleanup all activity trackers
+    for (const [sessionId, tracker] of this.sessionTrackers) {
+      try {
+        await tracker.finalize();
+        tracker.destroy();
+      } catch (err) {
+        this.log.warn({ err, sessionId }, "Tracker cleanup failed during stop");
+      }
+    }
+    this.sessionTrackers.clear();
+
     // Flush all active text buffers before stopping to prevent data loss
     for (const [sessionId, buf] of this.textBuffers) {
       try {
@@ -419,6 +438,37 @@ export class SlackAdapter extends MessagingAdapter {
     return buf;
   }
 
+  private getOrCreateTracker(sessionId: string, channelId: string): SlackActivityTracker {
+    let tracker = this.sessionTrackers.get(sessionId);
+    const mode = this.outputModeResolver.resolve(
+      this.core.configManager as any,
+      "slack",
+      sessionId,
+      this.core.sessionManager as any,
+    );
+    if (!tracker) {
+      tracker = new SlackActivityTracker({
+        channelId,
+        sessionId,
+        queue: this.queue,
+        outputMode: mode,
+      });
+      this.sessionTrackers.set(sessionId, tracker);
+    } else {
+      tracker.setOutputMode(mode);
+    }
+    return tracker;
+  }
+
+  private findSessionByChannel(channelId: string): { sessionId: string; meta: SlackSessionMeta } | undefined {
+    for (const [sessionId, meta] of this.sessions) {
+      if (meta.channelId === channelId) {
+        return { sessionId, meta };
+      }
+    }
+    return undefined;
+  }
+
   async sendMessage(sessionId: string, content: OutgoingMessage): Promise<void> {
     const meta = this.sessions.get(sessionId);
     if (!meta) {
@@ -440,15 +490,27 @@ export class SlackAdapter extends MessagingAdapter {
   protected async handleText(sessionId: string, content: OutgoingMessage): Promise<void> {
     const meta = this.getSessionMeta(sessionId);
     if (!meta) return;
-    // Text chunks are buffered and flushed as a single message after idle timeout
+
+    // Finalize activity tracker (marks turn as done, updates main message)
+    const tracker = this.sessionTrackers.get(sessionId);
+    if (tracker) await tracker.finalize();
+
+    // Post text in channel via text buffer (existing behavior)
     const buf = this.getTextBuffer(sessionId, meta.channelId);
     buf.append(content.text ?? "");
   }
 
   protected async handleSessionEnd(sessionId: string, content: OutgoingMessage): Promise<void> {
+    // Cleanup tracker
+    const tracker = this.sessionTrackers.get(sessionId);
+    if (tracker) {
+      await tracker.finalize();
+      tracker.destroy();
+      this.sessionTrackers.delete(sessionId);
+    }
+
     const meta = this.getSessionMeta(sessionId);
     if (!meta) return;
-    // Flush any pending text first
     await this.flushTextBuffer(sessionId);
 
     const blocks = this.formatter.formatOutgoing(content);
@@ -500,23 +562,69 @@ export class SlackAdapter extends MessagingAdapter {
   }
 
   protected async handleThought(sessionId: string, content: OutgoingMessage, _verbosity: DisplayVerbosity): Promise<void> {
-    await this.postFormattedMessage(sessionId, content);
+    const meta = this.getSessionMeta(sessionId);
+    if (!meta) return;
+    const tracker = this.getOrCreateTracker(sessionId, meta.channelId);
+    if (!tracker.getTurn()) await tracker.onNewPrompt();
+    await tracker.onThought(content.text ?? "");
   }
 
   protected async handleToolCall(sessionId: string, content: OutgoingMessage, _verbosity: DisplayVerbosity): Promise<void> {
-    await this.postFormattedMessage(sessionId, content);
+    const meta = this.getSessionMeta(sessionId);
+    if (!meta) return;
+    const tracker = this.getOrCreateTracker(sessionId, meta.channelId);
+
+    // Flush text buffer before tool card
+    const buf = this.textBuffers.get(sessionId);
+    if (buf) await buf.flush();
+
+    // Ensure turn exists
+    if (!tracker.getTurn()) await tracker.onNewPrompt();
+
+    const m = (content.metadata ?? {}) as Partial<ToolCallMeta>;
+    await tracker.onToolCall(
+      { id: m.id ?? "", name: m.name ?? "unknown", kind: m.kind, status: m.status, rawInput: m.rawInput, viewerLinks: m.viewerLinks },
+      String(m.kind ?? ""),
+      m.rawInput,
+    );
   }
 
   protected async handleToolUpdate(sessionId: string, content: OutgoingMessage, _verbosity: DisplayVerbosity): Promise<void> {
-    await this.postFormattedMessage(sessionId, content);
+    const meta = this.getSessionMeta(sessionId);
+    if (!meta) return;
+    const tracker = this.getOrCreateTracker(sessionId, meta.channelId);
+    const m = (content.metadata ?? {}) as Partial<ToolUpdateMeta>;
+
+    await tracker.onToolUpdate(
+      m.id ?? "",
+      m.status ?? "completed",
+      m.viewerLinks as ViewerLinks | undefined,
+      (m as any).viewerFilePath as string | undefined,
+      typeof m.content === "string" ? m.content : null,
+      m.rawInput ?? undefined,
+      (m as any).diffStats as { added: number; removed: number } | undefined,
+    );
   }
 
   protected async handlePlan(sessionId: string, content: OutgoingMessage, _verbosity: DisplayVerbosity): Promise<void> {
-    await this.postFormattedMessage(sessionId, content);
+    const meta = this.getSessionMeta(sessionId);
+    if (!meta) return;
+    const tracker = this.getOrCreateTracker(sessionId, meta.channelId);
+    if (!tracker.getTurn()) await tracker.onNewPrompt();
+    const entries = (content.metadata as any)?.planEntries ?? [];
+    await tracker.onPlan(entries);
   }
 
   protected async handleUsage(sessionId: string, content: OutgoingMessage, _verbosity: DisplayVerbosity): Promise<void> {
-    await this.postFormattedMessage(sessionId, content);
+    const meta = this.getSessionMeta(sessionId);
+    if (!meta) return;
+    const tracker = this.getOrCreateTracker(sessionId, meta.channelId);
+    const m = content.metadata as any;
+    await tracker.onUsage({
+      tokensUsed: m?.tokensUsed ?? m?.tokens,
+      contextSize: m?.contextSize,
+      cost: m?.cost,
+    });
   }
 
   protected async handleSystem(sessionId: string, content: OutgoingMessage): Promise<void> {
