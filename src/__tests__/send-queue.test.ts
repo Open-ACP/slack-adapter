@@ -15,6 +15,26 @@ describe("SlackSendQueue", () => {
     expect((result as any).ok).toBe(true);
   });
 
+  it("enqueues chat.update and invokes apiCall correctly", async () => {
+    const mockClient = {
+      apiCall: vi.fn().mockResolvedValue({ ok: true, ts: "12345" }),
+    } as unknown as WebClient;
+
+    const queue = new SlackSendQueue(mockClient);
+    const result = await queue.enqueue("chat.update", {
+      channel: "C123",
+      ts: "12345",
+      text: "updated text",
+    });
+
+    expect(mockClient.apiCall).toHaveBeenCalledWith("chat.update", {
+      channel: "C123",
+      ts: "12345",
+      text: "updated text",
+    });
+    expect((result as any).ok).toBe(true);
+  });
+
   it("throws for unknown method", async () => {
     const mockClient = { apiCall: vi.fn() } as unknown as WebClient;
     const queue = new SlackSendQueue(mockClient);
