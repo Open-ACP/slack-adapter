@@ -11,6 +11,9 @@ importers:
       '@clack/prompts':
         specifier: ^1.1.0
         version: 1.1.0
+      '@openacp/cli':
+        specifier: file:../OpenACP
+        version: file:../OpenACP(@types/node@25.5.0)
       '@slack/bolt':
         specifier: ^4.6.0
         version: 4.6.0(@types/express@5.0.6)
@@ -28,8 +31,8 @@ importers:
         version: 3.25.76
     devDependencies:
       '@openacp/plugin-sdk':
-        specifier: '>=2026.327.0'
-        version: 2026.328.2(@openacp/cli@2026.328.2(@types/node@25.5.0))
+        specifier: file:../OpenACP/packages/plugin-sdk
+        version: file:../OpenACP/packages/plugin-sdk(@openacp/cli@file:../OpenACP(@types/node@25.5.0))
       '@types/node':
         specifier: ^25.5.0
         version: 25.5.0
@@ -453,13 +456,13 @@ packages:
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
 
-  '@openacp/cli@2026.328.2':
-    resolution: {integrity: sha512-8M+wWo6teDEVGh/wv9LjbvnrVckW/8YPTralegm+Y2wdncSywiYwbmDa3QSQDAPANttMNEkOTxyZ+3gEfVdz3g==}
+  '@openacp/cli@file:../OpenACP':
+    resolution: {directory: ../OpenACP, type: directory}
     engines: {node: '>=20'}
     hasBin: true
 
-  '@openacp/plugin-sdk@2026.328.2':
-    resolution: {integrity: sha512-/k1U2euqGOMEP4aa/D9oY3F6IeiWk3nTxUUCwAAP3raYtClFfV6iDQqLVAOvFEl6D3p8z3PiM1yp5pzpU7LIbw==}
+  '@openacp/plugin-sdk@file:../OpenACP/packages/plugin-sdk':
+    resolution: {directory: ../OpenACP/packages/plugin-sdk, type: directory}
     peerDependencies:
       '@openacp/cli': '>=0.6.0'
 
@@ -2008,7 +2011,7 @@ snapshots:
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
 
-  '@openacp/cli@2026.328.2(@types/node@25.5.0)':
+  '@openacp/cli@file:../OpenACP(@types/node@25.5.0)':
     dependencies:
       '@agentclientprotocol/sdk': 0.16.1(zod@3.25.76)
       '@clack/prompts': 1.1.0
@@ -2034,9 +2037,9 @@ snapshots:
       - encoding
       - supports-color
 
-  '@openacp/plugin-sdk@2026.328.2(@openacp/cli@2026.328.2(@types/node@25.5.0))':
+  '@openacp/plugin-sdk@file:../OpenACP/packages/plugin-sdk(@openacp/cli@file:../OpenACP(@types/node@25.5.0))':
     dependencies:
-      '@openacp/cli': 2026.328.2(@types/node@25.5.0)
+      '@openacp/cli': file:../OpenACP(@types/node@25.5.0)
 
   '@pinojs/redact@0.4.0': {}
 

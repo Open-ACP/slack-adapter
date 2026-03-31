@@ -46,3 +46,15 @@ export interface SlackFileInfo {
   size: number;
   url_private: string;
 }
+
+/** State for a single prompt turn within a session */
+export interface TurnState {
+  /** Timestamp of the main progress message (used for editing and as thread parent) */
+  mainMessageTs: string;
+  /** Same as mainMessageTs — thread replies use this as thread_ts */
+  threadTs: string;
+  /** Timestamp of current aggregated tool card message in thread */
+  currentToolCardTs?: string;
+  /** Whether this turn has been finalized */
+  isFinalized: boolean;
+}

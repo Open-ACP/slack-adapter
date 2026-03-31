@@ -65,6 +65,9 @@ export class SlackEventRouter implements ISlackEventRouter {
       const subtype = msg.subtype;
       if (subtype && subtype !== "file_share") return;  // edited, deleted, etc.
 
+      // Ignore thread replies — only channel-level messages route to sessions
+      if ((message as any).thread_ts) return;
+
       const channelId = msg.channel;
       const text: string = msg.text ?? "";
       const userId: string = msg.user ?? "";

@@ -36,49 +36,24 @@ export class SlackRenderer extends BaseRenderer {
     }
   }
 
-  renderThought(content: OutgoingMessage, _verbosity: DisplayVerbosity): RenderedMessage {
-    const blocks = this.formatter.formatOutgoing(content)
-    return {
-      body: content.text ?? '',
-      format: 'structured',
-      components: blocks,
-    }
+  renderThought(_content: OutgoingMessage, _verbosity: DisplayVerbosity): RenderedMessage {
+    return { body: '', format: 'structured', components: [] }
   }
 
-  renderToolCall(content: OutgoingMessage, _verbosity: DisplayVerbosity): RenderedMessage {
-    const blocks = this.formatter.formatOutgoing(content)
-    return {
-      body: content.text ?? '',
-      format: 'structured',
-      components: blocks,
-    }
+  renderToolCall(_content: OutgoingMessage, _verbosity: DisplayVerbosity): RenderedMessage {
+    return { body: '', format: 'structured', components: [] }
   }
 
-  renderToolUpdate(content: OutgoingMessage, _verbosity: DisplayVerbosity): RenderedMessage {
-    const blocks = this.formatter.formatOutgoing(content)
-    return {
-      body: content.text ?? '',
-      format: 'structured',
-      components: blocks,
-    }
+  renderToolUpdate(_content: OutgoingMessage, _verbosity: DisplayVerbosity): RenderedMessage {
+    return { body: '', format: 'structured', components: [] }
   }
 
-  renderPlan(content: OutgoingMessage): RenderedMessage {
-    const blocks = this.formatter.formatOutgoing(content)
-    return {
-      body: content.text ?? '',
-      format: 'structured',
-      components: blocks,
-    }
+  renderPlan(_content: OutgoingMessage): RenderedMessage {
+    return { body: '', format: 'structured', components: [] }
   }
 
-  renderUsage(content: OutgoingMessage, _verbosity: DisplayVerbosity): RenderedMessage {
-    const blocks = this.formatter.formatOutgoing(content)
-    return {
-      body: content.text ?? '',
-      format: 'structured',
-      components: blocks,
-    }
+  renderUsage(_content: OutgoingMessage, _verbosity: DisplayVerbosity): RenderedMessage {
+    return { body: '', format: 'structured', components: [] }
   }
 
   renderError(content: OutgoingMessage): RenderedMessage {

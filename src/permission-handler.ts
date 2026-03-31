@@ -1,24 +1,25 @@
 import type { App, BlockAction, ButtonAction } from "@slack/bolt";
 import type { ISlackSendQueue } from "./send-queue.js";
+import type { PermissionOption } from "@openacp/plugin-sdk";
 
 export type PermissionResponseCallback = (requestId: string, optionId: string) => void;
 
 export interface ISlackPermissionHandler {
   register(app: App): void;
-  trackPendingMessage(requestId: string, channelId: string, messageTs: string): void;
+  trackPendingMessage(requestId: string, channelId: string, messageTs: string, options?: PermissionOption[]): void;
   cleanupSession(channelId: string): Promise<void>;
 }
 
 export class SlackPermissionHandler implements ISlackPermissionHandler {
-  private pendingMessages = new Map<string, { channelId: string; messageTs: string }>();
+  private pendingMessages = new Map<string, { channelId: string; messageTs: string; options?: PermissionOption[] }>();
 
   constructor(
     private queue: ISlackSendQueue,
     private onResponse: PermissionResponseCallback,
   ) {}
 
-  trackPendingMessage(requestId: string, channelId: string, messageTs: string): void {
-    this.pendingMessages.set(requestId, { channelId, messageTs });
+  trackPendingMessage(requestId: string, channelId: string, messageTs: string, options?: PermissionOption[]): void {
+    this.pendingMessages.set(requestId, { channelId, messageTs, options });
   }
 
   async cleanupSession(channelId: string): Promise<void> {
@@ -50,17 +51,37 @@ export class SlackPermissionHandler implements ISlackPermissionHandler {
         this.onResponse(requestId, optionId);
 
         // Remove from pending tracking since the user has responded
+        const pending = this.pendingMessages.get(requestId);
         this.pendingMessages.delete(requestId);
 
-        // Update message to remove action buttons and show confirmation
-        const message = body.message;
-        if (message) {
+        // Determine allow/deny: use stored option if available, fall back to heuristic
+        const option = pending?.options?.find((o) => o.id === optionId);
+        const isAllow = option !== undefined
+          ? option.isAllow
+          : (optionId.includes("allow") || optionId.includes("yes"));
+        const icon = isAllow ? "✅" : "❌";
+        const label = isAllow ? "Allowed" : "Denied";
+        const userName = body.user?.name ?? body.user?.id ?? "unknown";
+
+        try {
           await this.queue.enqueue("chat.update", {
-            channel: body.channel?.id ?? "",
-            ts: message.ts,
-            text: `\u2705 Permission response: *${optionId}*`,
-            blocks: [],
+            channel: body.channel?.id,
+            ts: body.message?.ts,
+            blocks: [
+              {
+                type: "context",
+                elements: [
+                  {
+                    type: "mrkdwn",
+                    text: `🔐 Permission — ${icon} ${label} by @${userName}`,
+                  },
+                ],
+              },
+            ],
+            text: `Permission ${label}`,
           });
+        } catch (err) {
+          // Non-critical: log but don't fail
         }
       }
     );

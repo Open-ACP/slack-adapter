@@ -4,6 +4,7 @@ import { App } from "@slack/bolt";
 import { WebClient } from "@slack/web-api";
 import {
   MessagingAdapter,
+  OutputModeResolver,
 } from "@openacp/plugin-sdk";
 import type {
   MessagingAdapterConfig,
@@ -15,6 +16,10 @@ import type {
   FileServiceInterface,
   DisplayVerbosity,
   IRenderer,
+  OutputMode,
+  ToolCallMeta,
+  ToolUpdateMeta,
+  ViewerLinks,
 } from "@openacp/plugin-sdk";
 import { SlackRenderer } from "./renderer.js";
 import type { SlackChannelConfig, Logger } from "./types.js";
@@ -23,8 +28,10 @@ import { SlackSendQueue } from "./send-queue.js";
 import { SlackFormatter } from "./formatter.js";
 import { SlackChannelManager } from "./channel-manager.js";
 import { SlackPermissionHandler } from "./permission-handler.js";
+import { SlackModalHandler } from "./modal-handler.js";
 import { SlackEventRouter } from "./event-router.js";
 import { SlackTextBuffer } from "./text-buffer.js";
+import { SlackActivityTracker } from "./activity-tracker.js";
 import { toSlug } from "./slug.js";
 import { isAudioClip } from "./utils.js";
 
@@ -61,6 +68,10 @@ export class SlackAdapter extends MessagingAdapter {
   private eventRouter!: SlackEventRouter;
   private sessions = new Map<string, SlackSessionMeta>();
   private textBuffers = new Map<string, SlackTextBuffer>();
+  private outputModeResolver = new OutputModeResolver();
+  private modalHandler = new SlackModalHandler();
+  private sessionTrackers = new Map<string, SlackActivityTracker>();
+  private adapterDefaultOutputMode: OutputMode | undefined;
   private botUserId = "";
   private slackConfig: SlackChannelConfig;
   private fileService!: FileServiceInterface;
@@ -121,6 +132,76 @@ export class SlackAdapter extends MessagingAdapter {
       },
     );
     this.permissionHandler.register(this.app);
+
+    // Register /outputmode slash command
+    this.app.command("/outputmode", async ({ command, ack, client }) => {
+      await ack();
+
+      const args = command.text.trim().toLowerCase();
+      const channelId = command.channel_id;
+
+      // Inline shortcut: /outputmode low|medium|high
+      if (args === "low" || args === "medium" || args === "high") {
+        const found = this.findSessionByChannel(channelId);
+        if (found) {
+          await this.core.sessionManager.patchRecord(found.sessionId, { outputMode: args });
+          const tracker = this.sessionTrackers.get(found.sessionId);
+          if (tracker) tracker.setOutputMode(args as OutputMode);
+        }
+        await client.chat.postEphemeral({
+          channel: channelId,
+          user: command.user_id,
+          text: `Output mode set to *${args}*`,
+        });
+        return;
+      }
+
+      // Open modal
+      const found = this.findSessionByChannel(channelId);
+      const currentMode = this.resolveOutputMode(found?.sessionId);
+
+      const view = this.modalHandler.buildOutputModeModal(currentMode, found?.sessionId, channelId);
+      await client.views.open({
+        trigger_id: command.trigger_id,
+        view: view as any,
+      });
+    });
+
+    // Handle /outputmode modal submission
+    this.app.view("output_mode_modal", async ({ ack, view, body }) => {
+      await ack();
+      const metadata = JSON.parse(view.private_metadata || "{}");
+      const result = this.modalHandler.parseSubmission(view.state, metadata.sessionId);
+
+      if (result.scope === "session" && result.sessionId) {
+        // Session scope: update this session's record and tracker
+        await this.core.sessionManager.patchRecord(result.sessionId, { outputMode: result.mode });
+        const tracker = this.sessionTrackers.get(result.sessionId);
+        if (tracker) tracker.setOutputMode(result.mode);
+      } else {
+        // Adapter scope: set in-memory default + update all existing trackers
+        this.adapterDefaultOutputMode = result.mode;
+        for (const tracker of this.sessionTrackers.values()) {
+          tracker.setOutputMode(result.mode);
+        }
+        this.log.info({ mode: result.mode }, "Adapter output mode changed");
+      }
+
+      // Post ephemeral confirmation
+      if (metadata.channelId) {
+        const modeLabel: Record<string, string> = { low: "🔇 Low", medium: "📊 Medium", high: "🔍 High" };
+        const scopeLabel = result.scope === "session" ? "this session" : "all sessions";
+        try {
+          await this.app.client.chat.postEphemeral({
+            channel: metadata.channelId,
+            user: body.user.id,
+            text: `Output mode set to *${modeLabel[result.mode] ?? result.mode}* for ${scopeLabel}`,
+          });
+        } catch {
+          // Non-critical
+        }
+      }
+    });
 
     // Event router — dispatch incoming messages from session channels to core
     this.eventRouter = new SlackEventRouter(
@@ -333,6 +414,17 @@ export class SlackAdapter extends MessagingAdapter {
   }
 
   async stop(): Promise<void> {
+    // Cleanup all activity trackers
+    for (const [sessionId, tracker] of this.sessionTrackers) {
+      try {
+        await tracker.finalize();
+        tracker.destroy();
+      } catch (err) {
+        this.log.warn({ err, sessionId }, "Tracker cleanup failed during stop");
+      }
+    }
+    this.sessionTrackers.clear();
+
     // Flush all active text buffers before stopping to prevent data loss
     for (const [sessionId, buf] of this.textBuffers) {
       try {
@@ -404,10 +496,8 @@ export class SlackAdapter extends MessagingAdapter {
     if (buf) { buf.destroy(); this.textBuffers.delete(sessionId); }
   }
 
-  private _sessionMetas = new Map<string, SlackSessionMeta>();
-
   private getSessionMeta(sessionId: string): SlackSessionMeta | undefined {
-    return this._sessionMetas.get(sessionId);
+    return this.sessions.get(sessionId);
   }
 
   private getTextBuffer(sessionId: string, channelId: string): SlackTextBuffer {
@@ -419,20 +509,51 @@ export class SlackAdapter extends MessagingAdapter {
     return buf;
   }
 
+  private resolveOutputMode(sessionId?: string): OutputMode {
+    // 1. Session record (most specific — set via patchRecord)
+    if (sessionId) {
+      const record = this.core.sessionManager.getSessionRecord(sessionId) as any;
+      const sessionMode = record?.outputMode as OutputMode | undefined;
+      if (sessionMode) return sessionMode;
+    }
+    // 2. Adapter default (in-memory, set by /outputmode with scope=adapter)
+    if (this.adapterDefaultOutputMode) return this.adapterDefaultOutputMode;
+    // 3. Global config (no session context)
+    return this.outputModeResolver.resolve(this.core.configManager as any, "slack");
+  }
+
+  private getOrCreateTracker(sessionId: string, channelId: string): SlackActivityTracker {
+    let tracker = this.sessionTrackers.get(sessionId);
+    const mode = this.resolveOutputMode(sessionId);
+    if (!tracker) {
+      tracker = new SlackActivityTracker({
+        channelId,
+        sessionId,
+        queue: this.queue,
+        outputMode: mode,
+      });
+      this.sessionTrackers.set(sessionId, tracker);
+    } else {
+      tracker.setOutputMode(mode);
+    }
+    return tracker;
+  }
+
+  private findSessionByChannel(channelId: string): { sessionId: string; meta: SlackSessionMeta } | undefined {
+    for (const [sessionId, meta] of this.sessions) {
+      if (meta.channelId === channelId) {
+        return { sessionId, meta };
+      }
+    }
+    return undefined;
+  }
+
   async sendMessage(sessionId: string, content: OutgoingMessage): Promise<void> {
-    const meta = this.sessions.get(sessionId);
-    if (!meta) {
+    if (!this.sessions.has(sessionId)) {
       this.log.warn({ sessionId }, "No Slack channel for session, skipping message");
       return;
     }
-
-    // Store meta per-session so concurrent calls for different sessions don't overwrite each other
-    this._sessionMetas.set(sessionId, meta);
-    try {
-      await super.sendMessage(sessionId, content);
-    } finally {
-      this._sessionMetas.delete(sessionId);
-    }
+    await super.sendMessage(sessionId, content);
   }
 
   // --- Handler overrides (dispatched by base class) ---
@@ -440,15 +561,27 @@ export class SlackAdapter extends MessagingAdapter {
   protected async handleText(sessionId: string, content: OutgoingMessage): Promise<void> {
     const meta = this.getSessionMeta(sessionId);
     if (!meta) return;
-    // Text chunks are buffered and flushed as a single message after idle timeout
+
+    // Finalize activity tracker (marks turn as done, updates main message)
+    const tracker = this.sessionTrackers.get(sessionId);
+    if (tracker) await tracker.finalize();
+
+    // Post text in channel via text buffer (existing behavior)
     const buf = this.getTextBuffer(sessionId, meta.channelId);
     buf.append(content.text ?? "");
   }
 
   protected async handleSessionEnd(sessionId: string, content: OutgoingMessage): Promise<void> {
+    // Cleanup tracker
+    const tracker = this.sessionTrackers.get(sessionId);
+    if (tracker) {
+      await tracker.finalize();
+      tracker.destroy();
+      this.sessionTrackers.delete(sessionId);
+    }
+
     const meta = this.getSessionMeta(sessionId);
     if (!meta) return;
-    // Flush any pending text first
     await this.flushTextBuffer(sessionId);
 
     const blocks = this.formatter.formatOutgoing(content);
@@ -500,23 +633,69 @@ export class SlackAdapter extends MessagingAdapter {
   }
 
   protected async handleThought(sessionId: string, content: OutgoingMessage, _verbosity: DisplayVerbosity): Promise<void> {
-    await this.postFormattedMessage(sessionId, content);
+    const meta = this.getSessionMeta(sessionId);
+    if (!meta) return;
+    const tracker = this.getOrCreateTracker(sessionId, meta.channelId);
+    if (!tracker.getTurn()) await tracker.onNewPrompt();
+    await tracker.onThought(content.text ?? "");
   }
 
   protected async handleToolCall(sessionId: string, content: OutgoingMessage, _verbosity: DisplayVerbosity): Promise<void> {
-    await this.postFormattedMessage(sessionId, content);
+    const meta = this.getSessionMeta(sessionId);
+    if (!meta) return;
+    const tracker = this.getOrCreateTracker(sessionId, meta.channelId);
+
+    // Flush text buffer before tool card
+    const buf = this.textBuffers.get(sessionId);
+    if (buf) await buf.flush();
+
+    // Ensure turn exists
+    if (!tracker.getTurn()) await tracker.onNewPrompt();
+
+    const m = (content.metadata ?? {}) as Partial<ToolCallMeta>;
+    await tracker.onToolCall(
+      { id: m.id ?? "", name: m.name ?? "unknown", kind: m.kind, status: m.status, rawInput: m.rawInput, viewerLinks: m.viewerLinks },
+      String(m.kind ?? ""),
+      m.rawInput,
+    );
   }
 
   protected async handleToolUpdate(sessionId: string, content: OutgoingMessage, _verbosity: DisplayVerbosity): Promise<void> {
-    await this.postFormattedMessage(sessionId, content);
+    const meta = this.getSessionMeta(sessionId);
+    if (!meta) return;
+    const tracker = this.getOrCreateTracker(sessionId, meta.channelId);
+    const m = (content.metadata ?? {}) as Partial<ToolUpdateMeta>;
+
+    await tracker.onToolUpdate(
+      m.id ?? "",
+      m.status ?? "completed",
+      m.viewerLinks as ViewerLinks | undefined,
+      (m as any).viewerFilePath as string | undefined,
+      typeof m.content === "string" ? m.content : null,
+      m.rawInput ?? undefined,
+      (m as any).diffStats as { added: number; removed: number } | undefined,
+    );
   }
 
   protected async handlePlan(sessionId: string, content: OutgoingMessage, _verbosity: DisplayVerbosity): Promise<void> {
-    await this.postFormattedMessage(sessionId, content);
+    const meta = this.getSessionMeta(sessionId);
+    if (!meta) return;
+    const tracker = this.getOrCreateTracker(sessionId, meta.channelId);
+    if (!tracker.getTurn()) await tracker.onNewPrompt();
+    const entries = (content.metadata as any)?.planEntries ?? [];
+    await tracker.onPlan(entries);
   }
 
   protected async handleUsage(sessionId: string, content: OutgoingMessage, _verbosity: DisplayVerbosity): Promise<void> {
-    await this.postFormattedMessage(sessionId, content);
+    const meta = this.getSessionMeta(sessionId);
+    if (!meta) return;
+    const tracker = this.getOrCreateTracker(sessionId, meta.channelId);
+    const m = content.metadata as any;
+    await tracker.onUsage({
+      tokensUsed: m?.tokensUsed ?? m?.tokens,
+      contextSize: m?.contextSize,
+      cost: m?.cost,
+    });
   }
 
   protected async handleSystem(sessionId: string, content: OutgoingMessage): Promise<void> {
@@ -580,7 +759,7 @@ export class SlackAdapter extends MessagingAdapter {
       });
       const ts = (result as { ts?: string })?.ts;
       if (ts) {
-        this.permissionHandler.trackPendingMessage(request.id, meta.channelId, ts);
+        this.permissionHandler.trackPendingMessage(request.id, meta.channelId, ts, request.options);
       }
     } catch (err) {
       this.log.error({ err, sessionId }, "Failed to post Slack permission request");
