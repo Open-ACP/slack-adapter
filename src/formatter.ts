@@ -59,38 +59,13 @@ export class SlackFormatter implements ISlackFormatter {
         return splitSafe(converted).map(chunk => section(chunk));
       }
 
+      // These types are handled by SlackActivityTracker — return empty blocks
       case "thought":
-        return [context(`\u{1F4AD} _${(message.text ?? "").slice(0, 500)}_`)];
-
-      case "tool_call": {
-        const name = (message as OutgoingMessage & { metadata?: { name?: string; input?: unknown } }).metadata?.name ?? "tool";
-        const input = (message as OutgoingMessage & { metadata?: { input?: unknown } }).metadata?.input;
-        const inputStr = input ? `\n\`\`\`\n${JSON.stringify(input, null, 2).slice(0, 500)}\n\`\`\`` : "";
-        return [context(`\u{1F527} \`${name}\`${inputStr}`)];
-      }
-
-      case "tool_update": {
-        const name = (message as OutgoingMessage & { metadata?: { name?: string; status?: string } }).metadata?.name ?? "tool";
-        const status = (message as OutgoingMessage & { metadata?: { status?: string } }).metadata?.status ?? "done";
-        const icon = status === "error" ? "\u274C" : "\u2705";
-        return [context(`${icon} \`${name}\` \u2014 ${status}`)];
-      }
-
+      case "tool_call":
+      case "tool_update":
       case "plan":
-        return [
-          { type: "divider" },
-          section(`\u{1F4CB} *Plan*\n${message.text ?? ""}`),
-        ];
-
-      case "usage": {
-        const meta = (message as OutgoingMessage & { metadata?: { input_tokens?: number; output_tokens?: number; cost_usd?: number } }).metadata ?? {};
-        const parts = [
-          meta.input_tokens != null ? `in: ${meta.input_tokens}` : null,
-          meta.output_tokens != null ? `out: ${meta.output_tokens}` : null,
-          meta.cost_usd != null ? `$${Number(meta.cost_usd).toFixed(4)}` : null,
-        ].filter((p): p is string => p !== null);
-        return parts.length ? [context(`\u{1F4CA} ${parts.join(" \u00B7 ")}`)] : [];
-      }
+      case "usage":
+        return [];
 
       case "session_end":
         return this.formatSessionEnd(message.text);

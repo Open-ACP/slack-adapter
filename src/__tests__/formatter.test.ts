@@ -11,9 +11,29 @@ describe("SlackFormatter.formatOutgoing", () => {
     expect(blocks[0].type).toBe("section");
   });
 
-  it("thought message returns context block", () => {
+  it("thought returns empty array (delegated to ActivityTracker)", () => {
     const blocks = fmt.formatOutgoing({ type: "thought", text: "thinking..." } as any);
-    expect(blocks[0].type).toBe("context");
+    expect(blocks).toEqual([]);
+  });
+
+  it("tool_call returns empty array (delegated to ActivityTracker)", () => {
+    const blocks = fmt.formatOutgoing({ type: "tool_call", metadata: { name: "read_file", input: { path: "/tmp/x" } } } as any);
+    expect(blocks).toEqual([]);
+  });
+
+  it("tool_update returns empty array (delegated to ActivityTracker)", () => {
+    const blocks = fmt.formatOutgoing({ type: "tool_update", metadata: { name: "read_file", status: "done" } } as any);
+    expect(blocks).toEqual([]);
+  });
+
+  it("plan returns empty array (delegated to ActivityTracker)", () => {
+    const blocks = fmt.formatOutgoing({ type: "plan", text: "Step 1: do thing" } as any);
+    expect(blocks).toEqual([]);
+  });
+
+  it("usage returns empty array (delegated to ActivityTracker)", () => {
+    const blocks = fmt.formatOutgoing({ type: "usage", metadata: { input_tokens: 10, output_tokens: 20, cost_usd: 0.001 } } as any);
+    expect(blocks).toEqual([]);
   });
 
   it("long text (>3000 chars) is split into multiple sections", () => {
