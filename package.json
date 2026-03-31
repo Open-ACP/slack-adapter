@@ -31,7 +31,7 @@
   },
   "dependencies": {
     "@clack/prompts": "^1.1.0",
-    "@openacp/cli": "file:../OpenACP",
+    "@openacp/cli": "^2026.331.1",
     "@slack/bolt": "^4.6.0",
     "@slack/web-api": "^7.15.0",
     "nanoid": "^5.0.0",
@@ -40,7 +40,7 @@
   },
   "packageManager": "pnpm@9.15.0",
   "devDependencies": {
-    "@openacp/plugin-sdk": "file:../OpenACP/packages/plugin-sdk",
+    "@openacp/plugin-sdk": "^2026.331.1",
     "@types/node": "^25.5.0",
     "typescript": "^5.4.0",
     "vitest": "^3.0.0"
