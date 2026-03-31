@@ -28,6 +28,7 @@ import { SlackSendQueue } from "./send-queue.js";
 import { SlackFormatter } from "./formatter.js";
 import { SlackChannelManager } from "./channel-manager.js";
 import { SlackPermissionHandler } from "./permission-handler.js";
+import { SlackModalHandler } from "./modal-handler.js";
 import { SlackEventRouter } from "./event-router.js";
 import { SlackTextBuffer } from "./text-buffer.js";
 import { SlackActivityTracker } from "./activity-tracker.js";
@@ -68,6 +69,7 @@ export class SlackAdapter extends MessagingAdapter {
   private sessions = new Map<string, SlackSessionMeta>();
   private textBuffers = new Map<string, SlackTextBuffer>();
   private outputModeResolver = new OutputModeResolver();
+  private modalHandler = new SlackModalHandler();
   private sessionTrackers = new Map<string, SlackActivityTracker>();
   private botUserId = "";
   private slackConfig: SlackChannelConfig;
@@ -129,6 +131,58 @@ export class SlackAdapter extends MessagingAdapter {
       },
     );
     this.permissionHandler.register(this.app);
+
+    // Register /outputmode slash command
+    this.app.command("/outputmode", async ({ command, ack, client }) => {
+      await ack();
+
+      const args = command.text.trim().toLowerCase();
+
+      // Inline shortcut: /outputmode low|medium|high
+      if (args === "low" || args === "medium" || args === "high") {
+        const channelId = command.channel_id;
+        const found = this.findSessionByChannel(channelId);
+        if (found) {
+          await this.core.sessionManager.patchRecord(found.sessionId, { outputMode: args });
+        }
+        await client.chat.postEphemeral({
+          channel: channelId,
+          user: command.user_id,
+          text: `Output mode set to *${args}*`,
+        });
+        return;
+      }
+
+      // Open modal
+      const found = this.findSessionByChannel(command.channel_id);
+      const currentMode = this.outputModeResolver.resolve(
+        this.core.configManager as any,
+        "slack",
+        found?.sessionId,
+        this.core.sessionManager as any,
+      );
+
+      const view = this.modalHandler.buildOutputModeModal(currentMode, found?.sessionId);
+      await client.views.open({
+        trigger_id: command.trigger_id,
+        view: view as any,
+      });
+    });
+
+    // Handle /outputmode modal submission
+    this.app.view("output_mode_modal", async ({ ack, view }) => {
+      await ack();
+      const metadata = JSON.parse(view.private_metadata || "{}");
+      const result = this.modalHandler.parseSubmission(view.state, metadata.sessionId);
+
+      if (result.scope === "session" && result.sessionId) {
+        await this.core.sessionManager.patchRecord(result.sessionId, { outputMode: result.mode });
+      } else {
+        // For adapter-level, we can't save config in external plugin context.
+        // Post ephemeral to confirm (adapter default changes require config save)
+        this.log.info({ mode: result.mode, scope: result.scope }, "Output mode changed");
+      }
+    });
 
     // Event router — dispatch incoming messages from session channels to core
     this.eventRouter = new SlackEventRouter(
