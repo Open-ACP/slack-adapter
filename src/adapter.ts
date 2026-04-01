@@ -230,6 +230,12 @@ export class SlackAdapter extends MessagingAdapter {
           return attachments.length > 0 ? attachments : undefined;
         };
 
+        // CommandRegistry dispatch — intercept /commands before sending to agent
+        if (text.startsWith("/")) {
+          const handled = await this.tryCommandDispatch(sessionChannelSlug, text, userId);
+          if (handled) return;
+        }
+
         processFiles()
           .then((attachments) => {
             this.core
@@ -494,6 +500,70 @@ export class SlackAdapter extends MessagingAdapter {
     this.sessions.delete(sessionId);
     const buf = this.textBuffers.get(sessionId);
     if (buf) { buf.destroy(); this.textBuffers.delete(sessionId); }
+  }
+
+  /**
+   * Try to dispatch a /command via CommandRegistry. Returns true if handled.
+   */
+  private async tryCommandDispatch(sessionChannelSlug: string, text: string, userId: string): Promise<boolean> {
+    const registry = (this.core as any).lifecycleManager?.serviceRegistry?.get("command-registry");
+    if (!registry) return false;
+
+    const spaceIdx = text.indexOf(" ");
+    const rawCommand = spaceIdx === -1 ? text.slice(1) : text.slice(1, spaceIdx);
+    const commandName = rawCommand.toLowerCase();
+    const rawArgs = spaceIdx === -1 ? "" : text.slice(spaceIdx + 1);
+
+    const def = registry.get(commandName);
+    if (!def) return false; // not a registered command, let agent handle it
+
+    const sessionId = this.core.sessionManager.getSessionByThread("slack", sessionChannelSlug)?.id ?? null;
+    const meta = sessionId ? this.getSessionMeta(sessionId) : undefined;
+    const channelId = meta?.channelId;
+
+    try {
+      const response = await registry.execute(text.slice(1), {
+        raw: rawArgs,
+        sessionId,
+        channelId: "slack",
+        userId,
+      });
+
+      if (!response || response.type === "silent") return false;
+
+      // Render response as Slack message
+      if (channelId) {
+        let replyText = "";
+        if (response.type === "text") {
+          replyText = response.text;
+        } else if (response.type === "error") {
+          replyText = `⚠️ ${response.message}`;
+        } else if (response.type === "menu") {
+          const lines = [response.title];
+          for (const opt of response.options) {
+            lines.push(`• ${opt.label}${opt.hint ? ` — ${opt.hint}` : ""}`);
+            lines.push(`  → Type \`${opt.command}\``);
+          }
+          replyText = lines.join("\n");
+        } else if (response.type === "list") {
+          const items = response.items.map((i: { label: string; detail?: string }) =>
+            `• ${i.label}${i.detail ? ` — ${i.detail}` : ""}`
+          );
+          replyText = `${response.title}\n${items.join("\n")}`;
+        }
+
+        if (replyText) {
+          await this.queue.enqueue("chat.postMessage", {
+            channel: channelId,
+            text: replyText,
+          });
+        }
+      }
+      return true;
+    } catch (err) {
+      this.log.error({ err, command: commandName }, "Command dispatch failed");
+      return false;
+    }
   }
 
   private getSessionMeta(sessionId: string): SlackSessionMeta | undefined {
