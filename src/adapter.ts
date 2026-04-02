@@ -211,7 +211,7 @@ export class SlackAdapter extends MessagingAdapter {
         }
         return undefined;
       },
-      (sessionChannelSlug, text, userId, files) => {
+      async (sessionChannelSlug, text, userId, files) => {
         const processFiles = async (): Promise<Attachment[] | undefined> => {
           if (!files?.length) return undefined;
           const audioFiles = files.filter((f) => isAudioClip(f));
