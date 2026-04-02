@@ -529,7 +529,8 @@ export class SlackAdapter extends MessagingAdapter {
         userId,
       });
 
-      if (!response || response.type === "silent") return false;
+      // silent/delegated — handled, no message needed
+      if (!response || response.type === "silent" || response.type === "delegated") return true;
 
       // Render response as Slack message
       if (channelId) {
@@ -550,6 +551,8 @@ export class SlackAdapter extends MessagingAdapter {
             `• ${i.label}${i.detail ? ` — ${i.detail}` : ""}`
           );
           replyText = `${response.title}\n${items.join("\n")}`;
+        } else if (response.type === "confirm") {
+          replyText = `${response.question}\nType \`${response.onYes}\` to confirm or \`${response.onNo}\` to cancel.`;
         }
 
         if (replyText) {
