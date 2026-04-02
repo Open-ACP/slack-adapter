@@ -565,7 +565,13 @@ export class SlackAdapter extends MessagingAdapter {
       return true;
     } catch (err) {
       this.log.error({ err, command: commandName }, "Command dispatch failed");
-      return false;
+      if (channelId) {
+        await this.queue.enqueue("chat.postMessage", {
+          channel: channelId,
+          text: `⚠️ Command failed: ${err instanceof Error ? err.message : String(err)}`,
+        }).catch(() => {});
+      }
+      return true; // handled (with error) — don't forward to agent
     }
   }
 
