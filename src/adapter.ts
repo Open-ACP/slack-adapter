@@ -516,6 +516,10 @@ export class SlackAdapter extends MessagingAdapter {
     this.sessions.delete(sessionId);
     const buf = this.textBuffers.get(sessionId);
     if (buf) { buf.destroy(); this.textBuffers.delete(sessionId); }
+    // Clean all per-session Maps to prevent unbounded memory growth
+    this._dispatchQueues.delete(sessionId);
+    this._skillCommandsTs.delete(sessionId);
+    this._pendingSkillCommands.delete(sessionId);
   }
 
   /**
