@@ -1,14 +1,14 @@
-# Design: Slack Adapter — Telegram Parity Update
+# Design: Slack Adapter — Telegram Parity Update (v2)
 
 **Date:** 2026-04-10  
 **Scope:** `slack-adapter/src/`  
-**Goal:** Align Slack adapter logic with Telegram adapter to fix critical bugs and add missing features.
+**Reference adapters:** `OpenACP/src/plugins/telegram/` and `discord-adapter/src/`
 
 ---
 
 ## Background
 
-A thorough comparison of the Telegram adapter (`OpenACP/src/plugins/telegram/`) and the Slack adapter (`slack-adapter/src/`) revealed several critical bugs and missing features. The Slack adapter was built earlier and has diverged from the patterns that Telegram established. This spec documents all gaps and the plan to address them in priority order.
+A thorough comparison of the Telegram adapter, Discord adapter, `IChannelAdapter` interface (`core/channel.ts`), and `SessionBridge` (`core/sessions/session-bridge.ts`) against the Slack adapter revealed **12 gaps** — critical bugs, missing interface methods, and missing features. This spec documents all gaps, their root causes, and the exact changes required.
 
 ---
 
@@ -18,19 +18,27 @@ A thorough comparison of the Telegram adapter (`OpenACP/src/plugins/telegram/`) 
 
 **File:** `src/adapter.ts` — `handleText()`
 
-**Problem:** `handleText` is called for every streaming text chunk. The current code calls `tracker.finalize()` on each chunk:
+**Root cause:**  
+`handleText` is called for every streaming text chunk. The current code calls `tracker.finalize()` on each chunk — `finalize()` marks the turn as complete and edits the "Processing..." message to "Done". But text arrives while the agent is still streaming. The session is NOT done when the first `text` event arrives.
+
+**Telegram & Discord equivalent:**  
+Both call `tracker.onTextStart()` which *seals* the tool card (stops tool updates) and dismisses the thinking indicator — but does NOT mark the turn as complete.
 
 ```typescript
-// Current (wrong):
-const tracker = this.sessionTrackers.get(sessionId);
-if (tracker) await tracker.finalize();
+// Telegram's handleText:
+if (!this.draftManager.hasDraft(sessionId)) {
+  const tracker = this.getOrCreateTracker(sessionId, threadId, mode);
+  await tracker.onTextStart();   // ← seals tool card, NOT finalize
+}
+
+// Discord's handleText:
+if (!this.draftManager.hasDraft(sessionId)) {
+  const tracker = this.getOrCreateTracker(sessionId, thread, mode);
+  await tracker.onTextStart();   // ← same pattern
+}
 ```
 
-`finalize()` marks the turn as complete and edits the "Processing..." message to "Done". But text arrives in streaming chunks — the session is NOT done yet when the first `text` event arrives. This causes the "Done" indicator to appear while the agent is still responding.
-
-**Telegram equivalent:** Telegram calls `tracker.onTextStart()` which *seals* the tool card (stops tool updates from flowing) and dismisses the thinking indicator — but does NOT mark the turn as complete.
-
-**Fix:** Add `onTextStart()` to `SlackActivityTracker`. Call it in `handleText` instead of `finalize()`.
+**Fix:** Add `onTextStart()` to `SlackActivityTracker`. Call it in `handleText` only when the text buffer is fresh (no previous text in the buffer for this turn), mirroring Telegram/Discord's draft check.
 
 ---
 
@@ -38,28 +46,24 @@ if (tracker) await tracker.finalize();
 
 **File:** `src/adapter.ts` — `sendMessage()`
 
-**Problem:** `sendMessage` calls `super.sendMessage()` directly without serialization:
+**Root cause:**  
+`SessionBridge` calls `adapter.sendMessage().catch()` — fire-and-forget. Multiple events (`tool_call`, `tool_update`, `text`) can arrive in rapid succession and be processed concurrently. Without serialization, a fast handler (`tool_update`) can overtake a slower one (`tool_call`), producing out-of-order state.
+
+**Telegram equivalent:**
 
 ```typescript
-// Current (wrong):
-async sendMessage(sessionId: string, content: OutgoingMessage): Promise<void> {
-  if (!this.sessions.has(sessionId)) { ... return; }
-  await super.sendMessage(sessionId, content);
-}
-```
-
-`SessionBridge` fires `sendMessage()` as fire-and-forget for each event. Multiple events (`tool_call`, `tool_update`, `text`) can arrive in rapid succession and be processed concurrently. Without serialization, a fast handler (`tool_update`) can overtake a slower one (`tool_call`), producing out-of-order state.
-
-**Telegram equivalent:** Wraps each `sendMessage` in a per-session promise chain (`_dispatchQueues`):
-
-```typescript
+// Telegram serializes per session:
 const prev = this._dispatchQueues.get(sessionId) ?? Promise.resolve();
-const next = prev.then(async () => { await super.sendMessage(sessionId, content); });
+const next = prev.then(async () => {
+  this._sessionThreadIds.set(sessionId, threadId);
+  try { await super.sendMessage(sessionId, content); }
+  finally { this._sessionThreadIds.delete(sessionId); }
+}).catch((err) => log.warn({ err, sessionId }, "Dispatch queue error"));
 this._dispatchQueues.set(sessionId, next);
 await next;
 ```
 
-**Fix:** Add `_dispatchQueues = new Map<string, Promise<void>>()` and wrap dispatch in the same pattern.
+**Fix:** Add `_dispatchQueues = new Map<string, Promise<void>>()` and wrap dispatch in the same per-session chain. Slack doesn't need the thread ID storage pattern (Telegram needs it because thread ID is retrieved from queue context; Slack stores it in `sessions` Map which is always available).
 
 ---
 
@@ -67,84 +71,177 @@ await next;
 
 **File:** `src/activity-tracker.ts`
 
-**Problem:** No equivalent of Telegram's `onTextStart()`. This method is needed to:
+**Root cause:**  
+No equivalent of Telegram/Discord's `onTextStart()`. Without it, `handleText` falls back to `finalize()` (Bug #1) or does nothing.
+
+**What `onTextStart()` must do:**
 1. Seal the thought buffer (no more thoughts accepted)
-2. Finalize the `toolCardState` (freeze tool card display)
-3. Update the main message to a neutral "responding" state (not "Done")
-
-Without this, text chunks arrive and either:
-- `finalize()` is called (current bug — marks "Done" too early), or
-- Nothing is called (tool card keeps showing stale "Processing..." state)
-
-**Fix:** Add `onTextStart()` to `SlackActivityTracker`:
+2. Finalize the `toolCardState` (freeze tool card, stop accepting updates)
+3. Update the main message to a neutral "responding" state (`isComplete: false`)
 
 ```typescript
 async onTextStart(): Promise<void> {
   if (!this.turn) return;
   this.thoughtBuffer.seal();
   if (this.toolCardState) {
-    this.toolCardState.finalize(); // freeze tool card
-    this.toolCardState = null;
+    this.toolCardState.finalize();  // freeze, don't destroy
+    this.toolCardState = null;      // new tool calls after text → fresh card
   }
-  // Update main message: still "Processing..." but tool phase is done
   await this.updateMainMessage(false);
 }
 ```
 
 ---
 
-### 4. [FEATURE] `sessionContext` and `tunnelService` Not Passed to ActivityTracker
+### 4. [MISSING] `stripTTSBlock` Not Implemented as Adapter Method
+
+**File:** `src/adapter.ts`
+
+**Root cause:**  
+`IChannelAdapter` declares `stripTTSBlock?(sessionId: string): Promise<void>`. This is called by `SessionBridge` when the speech plugin emits a `tts_strip` event:
+
+```typescript
+// session-bridge.ts line 401-403:
+case "tts_strip":
+  this.adapter.stripTTSBlock?.(this.session.id);
+  break;
+```
+
+Slack handles TTS stripping inline in `handleAttachment` (when audio upload arrives), but does NOT implement `stripTTSBlock()` as an adapter method. If the `tts_strip` event fires before or independently of the attachment, the `[TTS]...[/TTS]` block is never removed from the text buffer.
+
+**Fix:** Add `stripTTSBlock(sessionId: string)` method that calls `textBuffer.stripTtsBlock()`.
+
+---
+
+### 5. [MISSING] `sendSkillCommands` Not Implemented
+
+**File:** `src/adapter.ts`
+
+**Root cause:**  
+`IChannelAdapter` declares `sendSkillCommands?(sessionId, commands): Promise<void>`. Called by `SessionBridge` when the agent emits a `commands_update` event:
+
+```typescript
+// session-bridge.ts:
+case "commands_update":
+  this.adapter.sendSkillCommands?.(this.session.id, event.commands);
+  break;
+```
+
+Slack adapter has no implementation — skill command cards never appear for Slack sessions.
+
+**Fix:** Implement `sendSkillCommands(sessionId, commands)` to post a formatted list of available commands to the session channel. Post as a new message or edit previous one (track by storing `ts` per session).
+
+---
+
+### 6. [MISSING] `cleanupSkillCommands` Not Implemented
+
+**File:** `src/adapter.ts`
+
+**Root cause:**  
+`IChannelAdapter` declares `cleanupSkillCommands?(sessionId): Promise<void>`. Called by `SessionBridge` on `session_end` and `error` events:
+
+```typescript
+// session-bridge.ts:
+case "session_end":
+  this.session.finish(event.reason);
+  this.adapter.cleanupSkillCommands?.(this.session.id);  // ← called here
+  ...
+case "error":
+  this.session.fail(event.message);
+  this.adapter.cleanupSkillCommands?.(this.session.id);  // ← and here
+  ...
+```
+
+Without this, skill command messages left in the channel after session end are never updated or cleaned up.
+
+**Fix:** Implement `cleanupSkillCommands(sessionId)` to edit the skill commands message to show "Session ended", or delete/update it.
+
+---
+
+### 7. [MISSING] `cleanupSessionState` Not Implemented
+
+**File:** `src/adapter.ts`
+
+**Root cause:**  
+`IChannelAdapter` declares `cleanupSessionState?(sessionId): Promise<void>`. Called when switching agents — clears adapter-side per-session state so the new agent starts fresh.
+
+Telegram implements this to: finalize draft, cleanup draft manager, destroy activity tracker.
+
+Slack has no implementation — switching agents leaves the activity tracker in stale state.
+
+**Fix:** Implement `cleanupSessionState(sessionId)` to:
+1. Destroy activity tracker
+2. Flush and destroy text buffer  
+3. Remove from all session maps
+
+---
+
+### 8. [MISSING] `flushPendingSkillCommands` Not Implemented
+
+**File:** `src/adapter.ts`
+
+**Root cause:**  
+`IChannelAdapter` declares `flushPendingSkillCommands?(sessionId): Promise<void>`. Called after a session's threadId becomes available (via `SESSION_THREAD_READY` event) to flush commands that arrived before the channel was ready.
+
+Telegram queues skill commands in `_pendingSkillCommands` and flushes them in `flushPendingSkillCommands`. Slack has no pending queue or flush mechanism.
+
+**Fix:** Once `sendSkillCommands` is implemented (#5), add a `_pendingSkillCommands` map and implement `flushPendingSkillCommands` to flush after channel creation.
+
+Note: This is lower priority than #5/#6 since Slack channels are ready synchronously when sessions are created, making pending skill commands unlikely in practice.
+
+---
+
+### 9. [FEATURE] `sessionContext` + `tunnelService` Not Passed to ActivityTracker
 
 **File:** `src/adapter.ts` — `getOrCreateTracker()`
 
-**Problem:** Telegram passes `sessionContext` (session id + workingDirectory) and `tunnelService` to `ActivityTracker`, enabling tunnel viewer links in high output mode. Slack's `getOrCreateTracker` passes neither.
+**Root cause:**  
+Telegram/Discord pass `sessionContext` (id + workingDirectory) and `tunnelService` to their `ActivityTracker`. The Slack `SlackActivityTracker` accepts these via `SlackActivityTrackerConfig` but `getOrCreateTracker` never populates them.
 
-**Fix:** In `getOrCreateTracker`, retrieve tunnel service and session context from `core`:
+Without `sessionContext`, `DisplaySpecBuilder.buildToolSpec()` cannot generate viewer links for tools even when a tunnel is active.
 
+**Fix:** In `getOrCreateTracker`, extract from `core`:
 ```typescript
 const tunnelService = (this.core as any).lifecycleManager?.serviceRegistry?.get("tunnel");
 const session = this.core.sessionManager.getSession(sessionId);
-const sessionContext = session ? { id: sessionId, workingDirectory: session.workingDirectory } : undefined;
+const sessionContext = session?.workingDirectory
+  ? { id: sessionId, workingDirectory: session.workingDirectory }
+  : undefined;
 ```
 
 Pass both to `SlackActivityTrackerConfig`.
 
 ---
 
-### 5. [FEATURE] `sendSkillCommands()` Not Implemented
-
-**File:** `src/adapter.ts`
-
-**Problem:** `MessagingAdapter` base class supports `sendSkillCommands(sessionId, commands)` which sends the agent's available skill commands to the channel. Telegram implements this via `SkillCommandManager`. Slack doesn't implement it at all — skill command cards never appear.
-
-**Fix:** Implement `sendSkillCommands(sessionId: string, commands: AgentCommand[]): Promise<void>` in `SlackAdapter`:
-- Format commands as a Slack Block Kit message
-- Post to the session channel
-- No pending queue needed (Slack channels are always ready by the time skill commands arrive)
-
----
-
-### 6. [FEATURE] `handleUsage` Missing Completion Notification
+### 10. [FEATURE] `handleUsage` Missing Completion Notification
 
 **File:** `src/adapter.ts` — `handleUsage()`
 
-**Problem:** Telegram's `handleUsage` does two things:
-1. Sends usage stats as a standalone message to the session topic
-2. Sends a completion notification (`✅ Task completed`) to the notification topic
+**Root cause:**  
+Both Telegram and Discord send a completion notification to the notification channel from `handleUsage`. Telegram posts an inline notification; Discord calls `notificationChannel.send()`. Slack's `handleUsage` only appends usage to the tracker — no notification is sent.
 
-Slack's `handleUsage` only appends usage to the tracker (for display in the tool card). It doesn't send any message to `notificationChannelId`.
+Note: `sendNotification` IS called separately by `SessionBridge` via `NotificationManager`, but that covers general notifications. The inline completion notification with a direct channel link is separate and per-platform.
 
-**Fix:** After `tracker.onUsage()`, post a completion notification to `notificationChannelId` (if configured).
+**Fix:** After `tracker.onUsage()`, post a notification to `notificationChannelId`:
+```typescript
+if (this.slackConfig.notificationChannelId) {
+  const sess = this.core.sessionManager.getSession(sessionId);
+  const name = sess?.name || "Session";
+  await this.queue.enqueue("chat.postMessage", {
+    channel: this.slackConfig.notificationChannelId,
+    text: `✅ *${name}* — Task completed. <#${meta?.channelId}>`,
+  });
+}
+```
 
 ---
 
-### 7. [BUG] `handleError` Doesn't Destroy Tracker
+### 11. [BUG] `handleError` Doesn't Destroy Tracker
 
 **File:** `src/adapter.ts` — `handleError()`
 
-**Problem:** Telegram's `handleError` destroys the tracker and removes it from `sessionTrackers`. Slack's `handleError` only flushes the text buffer — the tracker keeps running with stale state.
-
-**Fix:** Mirror Telegram:
+**Root cause:**  
+Telegram and Discord both destroy the activity tracker on error:
 ```typescript
 const tracker = this.sessionTrackers.get(sessionId);
 if (tracker) {
@@ -153,26 +250,28 @@ if (tracker) {
 }
 ```
 
+Slack's `handleError` only flushes the text buffer — the tracker continues running with stale state, holding open timer references.
+
+**Fix:** Add tracker destroy to `handleError`.
+
 ---
 
-### 8. [MINOR] `CoreKernel` Interface Missing Typed Members
+### 12. [MINOR] `CoreKernel` Interface Missing Typed Members
 
 **File:** `src/adapter.ts` — `CoreKernel` interface
 
-**Problem:** Several core methods are accessed via `(this.core as any)` casts:
-- `lifecycleManager?.serviceRegistry?.get(...)` — for CommandRegistry and tunnel service
-- `assistantManager` — used in Telegram's `handleText` for assistant session filtering
+**Root cause:**  
+Several members are accessed via `(this.core as any)` casts:
+- `lifecycleManager?.serviceRegistry?.get(...)` — for CommandRegistry and tunnel service  
+- `sessionManager.getSession()` — already typed, but `session.workingDirectory` is missing from the interface
 
-The `CoreKernel` interface in Slack is a minimal subset. The `(this.core as any)` casts work at runtime but are fragile.
-
-**Fix:** Add typed optional properties to `CoreKernel`:
+**Fix:** Add typed optional members to `CoreKernel`:
 ```typescript
 lifecycleManager?: {
-  serviceRegistry?: {
-    get(name: string): unknown;
-  };
+  serviceRegistry?: { get(name: string): unknown };
 };
 ```
+And add `workingDirectory?: string` to the session interface returned by `getSession`.
 
 ---
 
@@ -183,48 +282,58 @@ lifecycleManager?: {
 | 1 | Critical Bug | `adapter.ts` | Fix `handleText` — call `onTextStart()` not `finalize()` |
 | 2 | Critical Bug | `adapter.ts` | Add `_dispatchQueues` serialization to `sendMessage` |
 | 3 | Feature | `activity-tracker.ts` | Add `onTextStart()` method |
-| 4 | Feature | `adapter.ts` | Pass `sessionContext` + `tunnelService` to tracker |
-| 5 | Feature | `adapter.ts` | Implement `sendSkillCommands()` |
-| 6 | Feature | `adapter.ts` | `handleUsage` → send completion notification |
-| 7 | Bug | `adapter.ts` | `handleError` → destroy tracker |
-| 8 | Minor | `adapter.ts` | Expand `CoreKernel` interface types |
+| 4 | Missing | `adapter.ts` | Implement `stripTTSBlock()` adapter method |
+| 5 | Missing | `adapter.ts` | Implement `sendSkillCommands()` |
+| 6 | Missing | `adapter.ts` | Implement `cleanupSkillCommands()` |
+| 7 | Missing | `adapter.ts` | Implement `cleanupSessionState()` |
+| 8 | Missing | `adapter.ts` | Implement `flushPendingSkillCommands()` + pending queue |
+| 9 | Feature | `adapter.ts` | Pass `sessionContext` + `tunnelService` to tracker |
+| 10 | Feature | `adapter.ts` | `handleUsage` → send completion notification |
+| 11 | Bug | `adapter.ts` | `handleError` → destroy tracker |
+| 12 | Minor | `adapter.ts` | Expand `CoreKernel` interface types |
 
 ---
 
-## Architecture: Revised Event Flow
+## Revised Architecture: Full Event Flow
 
 ```
 SessionBridge fires sendMessage() (fire-and-forget, concurrent)
                       ↓
-         SlackAdapter._dispatchQueues[sessionId]   ← NEW: serialize
+         SlackAdapter._dispatchQueues[sessionId]   ← [2] serialize
                       ↓ (serialized per session)
          super.sendMessage() → dispatchMessage()
-              ↓                      ↓
-         handleToolCall()        handleText()
-              ↓                      ↓
-      tracker.onNewPrompt()    tracker.onTextStart() ← FIXED (was finalize)
-      tracker.onToolCall()     textBuffer.append()
+              ┌────────────┬───────────────┬────────────┐
+              ↓            ↓               ↓            ↓
+       handleToolCall  handleText    handleSessionEnd  handleError
+              ↓            ↓               ↓            ↓
+     tracker.onNewPrompt  tracker.onTextStart()  tracker.finalize()  tracker.destroy()
+     tracker.onToolCall() [3] ← FIXED [1]        flushTextBuffer()
               ↓
-      handleSessionEnd()
-              ↓
-      tracker.finalize()  ← Only here marks "Done"
-      flushTextBuffer()
+       buf.flush() before tool card
+
+SessionBridge also calls adapter directly:
+  commands_update → sendSkillCommands()      [5] ← MISSING
+  session_end     → cleanupSkillCommands()   [6] ← MISSING
+  error           → cleanupSkillCommands()   [6] ← MISSING
+  tts_strip       → stripTTSBlock()          [4] ← MISSING
+  agent switch    → cleanupSessionState()    [7] ← MISSING
 ```
 
 ---
 
 ## Files Changed
 
-1. `src/activity-tracker.ts` — Add `onTextStart()` method
-2. `src/adapter.ts` — All other changes (dispatch queue, handleText fix, sendSkillCommands, handleUsage notification, handleError tracker destroy, CoreKernel types, sessionContext/tunnelService passing)
+1. `src/activity-tracker.ts` — Add `onTextStart()` method (#3)
+2. `src/adapter.ts` — All other changes (#1, #2, #4-#12)
 
-No new files needed. No tests broken by these changes (existing tests mock the tracker).
+No new files needed. Skill commands tracking (`_pendingSkillCommands`, message `ts` tracking) is lightweight enough to stay in `adapter.ts` without a separate manager class.
 
 ---
 
 ## Out of Scope
 
-- **ThinkingIndicator**: Telegram shows a "💭 Thinking..." message with elapsed time. Slack doesn't have a direct equivalent. Adding it would require posting then editing a message on each thought, which is expensive. Skipping for now — the tool card "Processing..." message serves the same purpose.
-- **Control message**: Telegram has a pinned session control message (bypass/TTS buttons). No Slack equivalent planned.
-- **handleConfigUpdate**: No visible user-facing change needed for Slack.
-- **Assistant session filtering**: Telegram filters out assistant session notifications. Slack doesn't have AssistantManager, so not applicable.
+- **ThinkingIndicator**: Telegram shows "💭 Thinking..." with elapsed time refresh. No Slack equivalent planned — the "Processing..." tool card message serves the same purpose.
+- **Control message / pinned status card**: Telegram has a pinned session control message with bypass/TTS buttons. No Slack equivalent planned.
+- **handleConfigUpdate / handleModeChange / handleModelUpdate**: No visible user-facing change needed for Slack (these trigger control message updates in Telegram, but Slack has no equivalent).
+- **`archiveSessionTopic`**: Telegram implements this for the archive command. Slack's `deleteSessionThread` already archives the channel. This method is optional in `IChannelAdapter` and can be deferred.
+- **Assistant session filtering**: Telegram and Discord suppress notifications for assistant sessions. Slack doesn't have an AssistantManager, so not applicable.
