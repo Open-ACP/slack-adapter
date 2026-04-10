@@ -887,6 +887,17 @@ export class SlackAdapter extends MessagingAdapter {
       this.log.warn({ err, sessionId: notification.sessionId }, "Failed to send Slack notification");
     }
   }
+
+  /**
+   * Remove [TTS]...[/TTS] blocks from the text buffer for a session.
+   * Called by SessionBridge on tts_strip events — fires independently of the
+   * attachment upload, so this handles the case where tts_strip arrives before
+   * or separately from handleAttachment.
+   */
+  async stripTTSBlock(sessionId: string): Promise<void> {
+    const buf = this.textBuffers.get(sessionId);
+    if (buf) await buf.stripTtsBlock();
+  }
 }
 
 export type { SlackChannelConfig } from "./types.js";
