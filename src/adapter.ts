@@ -395,9 +395,10 @@ export class SlackAdapter extends MessagingAdapter {
           const slug = `startup-${session.id.slice(0, 8)}`;
           this.sessions.set(session.id, { channelId: reuseChannelId, channelSlug: slug });
           session.threadId = slug;
-          // Persist slug to session store so session resume after restart can find it
+          // Persist both channelId and slug so the channel can be restored after restart.
+          // topicId is used here (vs threadId) for backward compat with existing records.
           await this.core.sessionManager.patchRecord(session.id, {
-            platform: { topicId: slug },
+            platform: { topicId: slug, channelId: reuseChannelId },
           });
           this.log.info({ sessionId: session.id, channelId: reuseChannelId }, "Reused startup channel");
         }
@@ -467,6 +468,12 @@ export class SlackAdapter extends MessagingAdapter {
     const meta = await this.channelManager.createChannel(sessionId, name);
     this.sessions.set(sessionId, meta);
     this.log.info({ sessionId, channelId: meta.channelId, slug: meta.channelSlug }, "Session channel created");
+    // Persist Slack-specific channelId (C01234...) so it can be recovered after restart.
+    // Core will also patchRecord with platform.threadId after this returns; it merges,
+    // so the final record will have both channelId and threadId.
+    await this.core.sessionManager.patchRecord(sessionId, {
+      platform: { channelId: meta.channelId },
+    });
     // Return the slug as the threadId so that lookups via getSessionByThread work
     return meta.channelSlug;
   }
@@ -654,10 +661,45 @@ export class SlackAdapter extends MessagingAdapter {
     return undefined;
   }
 
+  /**
+   * Attempt to restore a session's Slack channel metadata from the persisted session record.
+   *
+   * Called when a session is not in the in-memory `this.sessions` Map, which happens
+   * after a process restart when lazy resume re-creates the session without calling
+   * createSessionThread(). Without this, all agent responses are silently dropped.
+   */
+  private async tryRestoreSessionFromRecord(sessionId: string): Promise<void> {
+    const record = this.core.sessionManager.getSessionRecord(sessionId) as any;
+    const channelId = record?.platform?.channelId as string | undefined;
+    // Startup reuse sessions use topicId; normal sessions use threadId
+    const channelSlug = (record?.platform?.threadId ?? record?.platform?.topicId) as string | undefined;
+    if (!channelId || !channelSlug) return;
+
+    try {
+      const info = await this.queue.enqueue<{ channel: { is_archived: boolean } }>(
+        "conversations.info",
+        { channel: channelId },
+      );
+      if (info?.channel?.is_archived) {
+        await this.queue.enqueue("conversations.unarchive", { channel: channelId });
+      }
+      this.sessions.set(sessionId, { channelId, channelSlug });
+      this.log.info({ sessionId, channelId, channelSlug }, "Restored session channel from record after restart");
+    } catch (err) {
+      this.log.warn({ err, sessionId, channelId }, "Failed to restore session channel — channel may be deleted");
+    }
+  }
+
   async sendMessage(sessionId: string, content: OutgoingMessage): Promise<void> {
     if (!this.sessions.has(sessionId)) {
-      this.log.warn({ sessionId }, "No Slack channel for session, skipping message");
-      return;
+      // On restart, this.sessions is cleared. Lazy resume does not call
+      // createSessionThread(), so we self-heal by restoring from the persisted record.
+      await this.tryRestoreSessionFromRecord(sessionId);
+
+      if (!this.sessions.has(sessionId)) {
+        this.log.warn({ sessionId }, "No Slack channel for session, skipping message");
+        return;
+      }
     }
     // Serialize per session — SessionBridge fires sendMessage() fire-and-forget so
     // concurrent events (tool_call, tool_update, text) can race without this queue.
