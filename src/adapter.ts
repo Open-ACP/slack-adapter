@@ -986,6 +986,26 @@ export class SlackAdapter extends MessagingAdapter {
     this._pendingSkillCommands.delete(sessionId);
     await this.sendSkillCommands(sessionId, commands);
   }
+
+  /**
+   * Clean up all adapter-side state for a session.
+   *
+   * Called when switching agents so the new agent starts from a clean slate.
+   * Destroys the activity tracker, flushes and destroys the text buffer, and
+   * clears pending skill commands.
+   */
+  async cleanupSessionState(sessionId: string): Promise<void> {
+    this._pendingSkillCommands.delete(sessionId);
+    this._dispatchQueues.delete(sessionId);
+
+    const tracker = this.sessionTrackers.get(sessionId);
+    if (tracker) {
+      tracker.destroy();
+      this.sessionTrackers.delete(sessionId);
+    }
+
+    await this.flushTextBuffer(sessionId);
+  }
 }
 
 export type { SlackChannelConfig } from "./types.js";
