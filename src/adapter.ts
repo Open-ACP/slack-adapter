@@ -20,6 +20,8 @@ import type {
   ToolCallMeta,
   ToolUpdateMeta,
   ViewerLinks,
+  AgentCommand,
+  TunnelServiceInterface,
 } from "@openacp/plugin-sdk";
 import { SlackRenderer } from "./renderer.js";
 import type { SlackChannelConfig, Logger } from "./types.js";
@@ -38,8 +40,17 @@ import { isAudioClip } from "./utils.js";
 /** Minimal interface for the core kernel, accessed via ctx.kernel */
 interface CoreKernel {
   configManager: { get(): { security: { allowedUserIds: string[] } } };
+  lifecycleManager?: {
+    serviceRegistry?: { get(name: string): unknown };
+  };
   sessionManager: {
-    getSession(id: string): { id: string; threadId?: string; permissionGate: { requestId: string; resolve(optionId: string): void } } | undefined;
+    getSession(id: string): {
+      id: string;
+      name?: string;
+      threadId?: string;
+      workingDirectory?: string;
+      permissionGate: { requestId: string; resolve(optionId: string): void };
+    } | undefined;
     getSessionByThread(platform: string, threadId: string): { id: string } | undefined;
     getSessionRecord(id: string): { platform?: Record<string, unknown> } | undefined;
     patchRecord(id: string, patch: Record<string, unknown>): Promise<void>;
