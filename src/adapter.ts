@@ -708,9 +708,17 @@ export class SlackAdapter extends MessagingAdapter {
   }
 
   protected async handleError(sessionId: string, content: OutgoingMessage): Promise<void> {
+    // Destroy tracker on error — stops timer refs and prevents stale state
+    const tracker = this.sessionTrackers.get(sessionId);
+    if (tracker) {
+      tracker.destroy();
+      this.sessionTrackers.delete(sessionId);
+    }
+    // Drop the dispatch queue entry — no more events expected after an error
+    this._dispatchQueues.delete(sessionId);
+
     const meta = this.getSessionMeta(sessionId);
     if (!meta) return;
-    // Flush any pending text first
     await this.flushTextBuffer(sessionId);
 
     const blocks = this.formatter.formatOutgoing(content);
@@ -805,6 +813,16 @@ export class SlackAdapter extends MessagingAdapter {
       contextSize: m?.contextSize,
       cost: m?.cost,
     });
+
+    // Post inline completion notification with direct channel link
+    if (this.slackConfig.notificationChannelId) {
+      const sess = this.core.sessionManager.getSession(sessionId);
+      const name = sess?.name ?? "Session";
+      await this.queue.enqueue("chat.postMessage", {
+        channel: this.slackConfig.notificationChannelId,
+        text: `✅ *${name}* — Task completed. <#${meta.channelId}>`,
+      }).catch((err) => this.log.warn({ err, sessionId }, "Failed to post completion notification"));
+    }
   }
 
   protected async handleSystem(sessionId: string, content: OutgoingMessage): Promise<void> {
