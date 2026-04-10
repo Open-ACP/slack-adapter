@@ -44,6 +44,7 @@ export class SlackActivityTracker {
   private thoughtBuffer = new ThoughtBuffer();
   private renderer = new SlackToolCardRenderer();
   private turn: TurnState | null = null;
+  private textStarted = false;
   private lastSnapshot: ToolCardSnapshot = {
     specs: [],
     totalVisible: 0,
@@ -75,6 +76,7 @@ export class SlackActivityTracker {
     // Reset state
     this.toolStateMap.clear();
     this.thoughtBuffer.reset();
+    this.textStarted = false;
     if (this.toolCardState) {
       this.toolCardState.destroy();
       this.toolCardState = null;
@@ -205,6 +207,26 @@ export class SlackActivityTracker {
     this.ensureToolCardState();
     this.toolCardState!.updateFromSpec(spec);
 
+    await this.updateMainMessage(false);
+  }
+
+  /**
+   * Called on the first text chunk of a turn.
+   *
+   * Seals the thought buffer and freezes the tool card — no more updates accepted.
+   * Does NOT mark the turn as complete (that's finalize()'s job). Idempotent: safe
+   * to call multiple times per turn.
+   */
+  async onTextStart(): Promise<void> {
+    if (!this.turn || this.textStarted) return;
+    this.textStarted = true;
+    this.thoughtBuffer.seal();
+    if (this.toolCardState) {
+      // Freeze the tool card — don't destroy it, keep it visible
+      this.toolCardState.finalize();
+      // Null out so any tool calls arriving after text start get a fresh card
+      this.toolCardState = null;
+    }
     await this.updateMainMessage(false);
   }
 
