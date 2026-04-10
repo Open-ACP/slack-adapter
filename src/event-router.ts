@@ -23,7 +23,7 @@ interface SlackMessageEvent {
 export type SessionLookup = (channelId: string) => SlackSessionMeta | undefined;
 
 // Callback to dispatch an incoming message to core
-export type IncomingMessageCallback = (sessionId: string, text: string, userId: string, files?: SlackFileInfo[]) => void;
+export type IncomingMessageCallback = (sessionId: string, text: string, userId: string, files?: SlackFileInfo[]) => void | Promise<void>;
 
 // Callback to create a new session when user messages the notification channel
 export type NewSessionCallback = (text: string, userId: string) => void;

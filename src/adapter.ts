@@ -20,6 +20,8 @@ import type {
   ToolCallMeta,
   ToolUpdateMeta,
   ViewerLinks,
+  AgentCommand,
+  TunnelServiceInterface,
 } from "@openacp/plugin-sdk";
 import { SlackRenderer } from "./renderer.js";
 import type { SlackChannelConfig, Logger } from "./types.js";
@@ -38,8 +40,17 @@ import { isAudioClip } from "./utils.js";
 /** Minimal interface for the core kernel, accessed via ctx.kernel */
 interface CoreKernel {
   configManager: { get(): { security: { allowedUserIds: string[] } } };
+  lifecycleManager?: {
+    serviceRegistry?: { get(name: string): unknown };
+  };
   sessionManager: {
-    getSession(id: string): { id: string; threadId?: string; permissionGate: { requestId: string; resolve(optionId: string): void } } | undefined;
+    getSession(id: string): {
+      id: string;
+      name?: string;
+      threadId?: string;
+      workingDirectory?: string;
+      permissionGate: { requestId: string; resolve(optionId: string): void };
+    } | undefined;
     getSessionByThread(platform: string, threadId: string): { id: string } | undefined;
     getSessionRecord(id: string): { platform?: Record<string, unknown> } | undefined;
     patchRecord(id: string, patch: Record<string, unknown>): Promise<void>;
@@ -71,6 +82,11 @@ export class SlackAdapter extends MessagingAdapter {
   private outputModeResolver = new OutputModeResolver();
   private modalHandler = new SlackModalHandler();
   private sessionTrackers = new Map<string, SlackActivityTracker>();
+  private _dispatchQueues = new Map<string, Promise<void>>();
+  /** Message `ts` of the skill commands card per session, for in-place edits */
+  private _skillCommandsTs = new Map<string, string>();
+  /** Commands queued before a session channel was ready */
+  private _pendingSkillCommands = new Map<string, AgentCommand[]>();
   private adapterDefaultOutputMode: OutputMode | undefined;
   private botUserId = "";
   private slackConfig: SlackChannelConfig;
@@ -211,7 +227,7 @@ export class SlackAdapter extends MessagingAdapter {
         }
         return undefined;
       },
-      (sessionChannelSlug, text, userId, files) => {
+      async (sessionChannelSlug, text, userId, files) => {
         const processFiles = async (): Promise<Attachment[] | undefined> => {
           if (!files?.length) return undefined;
           const audioFiles = files.filter((f) => isAudioClip(f));
@@ -379,9 +395,10 @@ export class SlackAdapter extends MessagingAdapter {
           const slug = `startup-${session.id.slice(0, 8)}`;
           this.sessions.set(session.id, { channelId: reuseChannelId, channelSlug: slug });
           session.threadId = slug;
-          // Persist slug to session store so session resume after restart can find it
+          // Persist both channelId and slug so the channel can be restored after restart.
+          // topicId is used here (vs threadId) for backward compat with existing records.
           await this.core.sessionManager.patchRecord(session.id, {
-            platform: { topicId: slug },
+            platform: { topicId: slug, channelId: reuseChannelId },
           });
           this.log.info({ sessionId: session.id, channelId: reuseChannelId }, "Reused startup channel");
         }
@@ -451,6 +468,12 @@ export class SlackAdapter extends MessagingAdapter {
     const meta = await this.channelManager.createChannel(sessionId, name);
     this.sessions.set(sessionId, meta);
     this.log.info({ sessionId, channelId: meta.channelId, slug: meta.channelSlug }, "Session channel created");
+    // Persist Slack-specific channelId (C01234...) so it can be recovered after restart.
+    // Core will also patchRecord with platform.threadId after this returns; it merges,
+    // so the final record will have both channelId and threadId.
+    await this.core.sessionManager.patchRecord(sessionId, {
+      platform: { channelId: meta.channelId },
+    });
     // Return the slug as the threadId so that lookups via getSessionByThread work
     return meta.channelSlug;
   }
@@ -500,6 +523,10 @@ export class SlackAdapter extends MessagingAdapter {
     this.sessions.delete(sessionId);
     const buf = this.textBuffers.get(sessionId);
     if (buf) { buf.destroy(); this.textBuffers.delete(sessionId); }
+    // Clean all per-session Maps to prevent unbounded memory growth
+    this._dispatchQueues.delete(sessionId);
+    this._skillCommandsTs.delete(sessionId);
+    this._pendingSkillCommands.delete(sessionId);
   }
 
   /**
@@ -529,7 +556,8 @@ export class SlackAdapter extends MessagingAdapter {
         userId,
       });
 
-      if (!response || response.type === "silent") return false;
+      // silent/delegated — handled, no message needed
+      if (!response || response.type === "silent" || response.type === "delegated") return true;
 
       // Render response as Slack message
       if (channelId) {
@@ -550,6 +578,8 @@ export class SlackAdapter extends MessagingAdapter {
             `• ${i.label}${i.detail ? ` — ${i.detail}` : ""}`
           );
           replyText = `${response.title}\n${items.join("\n")}`;
+        } else if (response.type === "confirm") {
+          replyText = `${response.question}\nType \`${response.onYes}\` to confirm or \`${response.onNo}\` to cancel.`;
         }
 
         if (replyText) {
@@ -562,7 +592,13 @@ export class SlackAdapter extends MessagingAdapter {
       return true;
     } catch (err) {
       this.log.error({ err, command: commandName }, "Command dispatch failed");
-      return false;
+      if (channelId) {
+        await this.queue.enqueue("chat.postMessage", {
+          channel: channelId,
+          text: `⚠️ Command failed: ${err instanceof Error ? err.message : String(err)}`,
+        }).catch(() => {});
+      }
+      return true; // handled (with error) — don't forward to agent
     }
   }
 
@@ -596,11 +632,18 @@ export class SlackAdapter extends MessagingAdapter {
     let tracker = this.sessionTrackers.get(sessionId);
     const mode = this.resolveOutputMode(sessionId);
     if (!tracker) {
+      const tunnelService = this.core.lifecycleManager?.serviceRegistry?.get("tunnel") as TunnelServiceInterface | undefined;
+      const session = this.core.sessionManager.getSession(sessionId);
+      const sessionContext = session?.workingDirectory
+        ? { id: sessionId, workingDirectory: session.workingDirectory }
+        : undefined;
       tracker = new SlackActivityTracker({
         channelId,
         sessionId,
         queue: this.queue,
         outputMode: mode,
+        tunnelService,
+        sessionContext,
       });
       this.sessionTrackers.set(sessionId, tracker);
     } else {
@@ -618,12 +661,54 @@ export class SlackAdapter extends MessagingAdapter {
     return undefined;
   }
 
+  /**
+   * Attempt to restore a session's Slack channel metadata from the persisted session record.
+   *
+   * Called when a session is not in the in-memory `this.sessions` Map, which happens
+   * after a process restart when lazy resume re-creates the session without calling
+   * createSessionThread(). Without this, all agent responses are silently dropped.
+   */
+  private async tryRestoreSessionFromRecord(sessionId: string): Promise<void> {
+    const record = this.core.sessionManager.getSessionRecord(sessionId) as any;
+    const channelId = record?.platform?.channelId as string | undefined;
+    // Startup reuse sessions use topicId; normal sessions use threadId
+    const channelSlug = (record?.platform?.threadId ?? record?.platform?.topicId) as string | undefined;
+    if (!channelId || !channelSlug) return;
+
+    try {
+      const info = await this.queue.enqueue<{ channel: { is_archived: boolean } }>(
+        "conversations.info",
+        { channel: channelId },
+      );
+      if (info?.channel?.is_archived) {
+        await this.queue.enqueue("conversations.unarchive", { channel: channelId });
+      }
+      this.sessions.set(sessionId, { channelId, channelSlug });
+      this.log.info({ sessionId, channelId, channelSlug }, "Restored session channel from record after restart");
+    } catch (err) {
+      this.log.warn({ err, sessionId, channelId }, "Failed to restore session channel — channel may be deleted");
+    }
+  }
+
   async sendMessage(sessionId: string, content: OutgoingMessage): Promise<void> {
     if (!this.sessions.has(sessionId)) {
-      this.log.warn({ sessionId }, "No Slack channel for session, skipping message");
-      return;
+      // On restart, this.sessions is cleared. Lazy resume does not call
+      // createSessionThread(), so we self-heal by restoring from the persisted record.
+      await this.tryRestoreSessionFromRecord(sessionId);
+
+      if (!this.sessions.has(sessionId)) {
+        this.log.warn({ sessionId }, "No Slack channel for session, skipping message");
+        return;
+      }
     }
-    await super.sendMessage(sessionId, content);
+    // Serialize per session — SessionBridge fires sendMessage() fire-and-forget so
+    // concurrent events (tool_call, tool_update, text) can race without this queue.
+    const prev = this._dispatchQueues.get(sessionId) ?? Promise.resolve();
+    const next = prev
+      .then(() => super.sendMessage(sessionId, content))
+      .catch((err) => { this.log.warn({ err, sessionId }, "Dispatch queue error"); });
+    this._dispatchQueues.set(sessionId, next);
+    await next;
   }
 
   // --- Handler overrides (dispatched by base class) ---
@@ -632,11 +717,11 @@ export class SlackAdapter extends MessagingAdapter {
     const meta = this.getSessionMeta(sessionId);
     if (!meta) return;
 
-    // Finalize activity tracker (marks turn as done, updates main message)
+    // Seal tool card on first text chunk without marking the turn complete.
+    // finalize() is called later in handleSessionEnd when the turn truly ends.
     const tracker = this.sessionTrackers.get(sessionId);
-    if (tracker) await tracker.finalize();
+    if (tracker) await tracker.onTextStart();
 
-    // Post text in channel via text buffer (existing behavior)
     const buf = this.getTextBuffer(sessionId, meta.channelId);
     buf.append(content.text ?? "");
   }
@@ -649,6 +734,8 @@ export class SlackAdapter extends MessagingAdapter {
       tracker.destroy();
       this.sessionTrackers.delete(sessionId);
     }
+    // No more events expected after session end — drop the queue entry
+    this._dispatchQueues.delete(sessionId);
 
     const meta = this.getSessionMeta(sessionId);
     if (!meta) return;
@@ -669,9 +756,19 @@ export class SlackAdapter extends MessagingAdapter {
   }
 
   protected async handleError(sessionId: string, content: OutgoingMessage): Promise<void> {
+    // Finalize then destroy tracker — ensures the Slack message gets a final update
+    // before we tear down, matching the same finalize→destroy pattern in handleSessionEnd.
+    const tracker = this.sessionTrackers.get(sessionId);
+    if (tracker) {
+      await tracker.finalize();
+      tracker.destroy();
+      this.sessionTrackers.delete(sessionId);
+    }
+    // Drop the dispatch queue entry — no more events expected after an error
+    this._dispatchQueues.delete(sessionId);
+
     const meta = this.getSessionMeta(sessionId);
     if (!meta) return;
-    // Flush any pending text first
     await this.flushTextBuffer(sessionId);
 
     const blocks = this.formatter.formatOutgoing(content);
@@ -766,6 +863,16 @@ export class SlackAdapter extends MessagingAdapter {
       contextSize: m?.contextSize,
       cost: m?.cost,
     });
+
+    // Post inline completion notification with direct channel link
+    if (this.slackConfig.notificationChannelId) {
+      const sess = this.core.sessionManager.getSession(sessionId);
+      const name = sess?.name ?? "Session";
+      await this.queue.enqueue("chat.postMessage", {
+        channel: this.slackConfig.notificationChannelId,
+        text: `✅ *${name}* — Task completed. <#${meta.channelId}>`,
+      }).catch((err) => this.log.warn({ err, sessionId }, "Failed to post completion notification"));
+    }
   }
 
   protected async handleSystem(sessionId: string, content: OutgoingMessage): Promise<void> {
@@ -802,6 +909,18 @@ export class SlackAdapter extends MessagingAdapter {
     } catch (err) {
       this.log.error({ err, sessionId, type: content.type }, "Failed to post Slack message");
     }
+  }
+
+  private formatSkillCommands(commands: AgentCommand[]): string {
+    if (commands.length === 0) return "_No commands available_";
+    const lines = ["*Available commands:*"];
+    for (const cmd of commands) {
+      const hint = (cmd as { description?: string }).description
+        ? ` — ${(cmd as { description?: string }).description}`
+        : "";
+      lines.push(`• \`/${cmd.name}\`${hint}`);
+    }
+    return lines.join("\n");
   }
 
   // NOTE: Async flow — different from Telegram adapter.
@@ -858,6 +977,109 @@ export class SlackAdapter extends MessagingAdapter {
     } catch (err) {
       this.log.warn({ err, sessionId: notification.sessionId }, "Failed to send Slack notification");
     }
+  }
+
+  /**
+   * Remove [TTS]...[/TTS] blocks from the text buffer for a session.
+   * Called by SessionBridge on tts_strip events — fires independently of the
+   * attachment upload, so this handles the case where tts_strip arrives before
+   * or separately from handleAttachment.
+   */
+  async stripTTSBlock(sessionId: string): Promise<void> {
+    const buf = this.textBuffers.get(sessionId);
+    if (buf) await buf.stripTtsBlock();
+  }
+
+  /**
+   * Post or update the skill commands card in the session channel.
+   * If the session channel is not yet ready, queues for later flush.
+   */
+  async sendSkillCommands(sessionId: string, commands: AgentCommand[]): Promise<void> {
+    const meta = this.sessions.get(sessionId);
+    if (!meta) {
+      // Channel not ready yet — queue and flush in flushPendingSkillCommands()
+      this._pendingSkillCommands.set(sessionId, commands);
+      return;
+    }
+
+    const text = this.formatSkillCommands(commands);
+    const existingTs = this._skillCommandsTs.get(sessionId);
+
+    try {
+      if (existingTs) {
+        await this.queue.enqueue("chat.update", {
+          channel: meta.channelId,
+          ts: existingTs,
+          text,
+          blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
+        });
+      } else {
+        const result = await this.queue.enqueue<{ ts?: string }>("chat.postMessage", {
+          channel: meta.channelId,
+          text,
+          blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
+        });
+        if (result?.ts) this._skillCommandsTs.set(sessionId, result.ts);
+      }
+    } catch (err) {
+      this.log.warn({ err, sessionId }, "Failed to post/update skill commands");
+    }
+  }
+
+  /**
+   * Update the skill commands card to "Session ended" and clear all tracking.
+   * Called by SessionBridge on session_end and error events.
+   */
+  async cleanupSkillCommands(sessionId: string): Promise<void> {
+    this._pendingSkillCommands.delete(sessionId);
+
+    const ts = this._skillCommandsTs.get(sessionId);
+    const meta = this.sessions.get(sessionId);
+    if (ts && meta) {
+      try {
+        await this.queue.enqueue("chat.update", {
+          channel: meta.channelId,
+          ts,
+          text: "_Session ended_",
+          blocks: [{ type: "section", text: { type: "mrkdwn", text: "_Session ended_" } }],
+        });
+      } catch (err) {
+        this.log.warn({ err, sessionId }, "Failed to cleanup skill commands card");
+      }
+    }
+
+    this._skillCommandsTs.delete(sessionId);
+  }
+
+  /**
+   * Flush any skill commands that were queued before the session channel was ready.
+   * Called after createSessionThread() makes the channel available.
+   */
+  async flushPendingSkillCommands(sessionId: string): Promise<void> {
+    const commands = this._pendingSkillCommands.get(sessionId);
+    if (!commands) return;
+    this._pendingSkillCommands.delete(sessionId);
+    await this.sendSkillCommands(sessionId, commands);
+  }
+
+  /**
+   * Clean up all adapter-side state for a session.
+   *
+   * Called when switching agents so the new agent starts from a clean slate.
+   * Destroys the activity tracker, flushes and destroys the text buffer, and
+   * clears pending skill commands.
+   */
+  async cleanupSessionState(sessionId: string): Promise<void> {
+    this._pendingSkillCommands.delete(sessionId);
+    this._dispatchQueues.delete(sessionId);
+
+    const tracker = this.sessionTrackers.get(sessionId);
+    if (tracker) {
+      tracker.destroy();
+      this.sessionTrackers.delete(sessionId);
+    }
+
+    await this.flushTextBuffer(sessionId);
   }
 }
 
