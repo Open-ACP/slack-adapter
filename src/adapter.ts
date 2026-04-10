@@ -621,11 +621,18 @@ export class SlackAdapter extends MessagingAdapter {
     let tracker = this.sessionTrackers.get(sessionId);
     const mode = this.resolveOutputMode(sessionId);
     if (!tracker) {
+      const tunnelService = this.core.lifecycleManager?.serviceRegistry?.get("tunnel") as TunnelServiceInterface | undefined;
+      const session = this.core.sessionManager.getSession(sessionId);
+      const sessionContext = session?.workingDirectory
+        ? { id: sessionId, workingDirectory: session.workingDirectory }
+        : undefined;
       tracker = new SlackActivityTracker({
         channelId,
         sessionId,
         queue: this.queue,
         outputMode: mode,
+        tunnelService,
+        sessionContext,
       });
       this.sessionTrackers.set(sessionId, tracker);
     } else {
