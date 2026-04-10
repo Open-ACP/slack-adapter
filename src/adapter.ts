@@ -734,6 +734,8 @@ export class SlackAdapter extends MessagingAdapter {
       tracker.destroy();
       this.sessionTrackers.delete(sessionId);
     }
+    // No more events expected after session end — drop the queue entry
+    this._dispatchQueues.delete(sessionId);
 
     const meta = this.getSessionMeta(sessionId);
     if (!meta) return;
@@ -754,9 +756,11 @@ export class SlackAdapter extends MessagingAdapter {
   }
 
   protected async handleError(sessionId: string, content: OutgoingMessage): Promise<void> {
-    // Destroy tracker on error — stops timer refs and prevents stale state
+    // Finalize then destroy tracker — ensures the Slack message gets a final update
+    // before we tear down, matching the same finalize→destroy pattern in handleSessionEnd.
     const tracker = this.sessionTrackers.get(sessionId);
     if (tracker) {
+      await tracker.finalize();
       tracker.destroy();
       this.sessionTrackers.delete(sessionId);
     }
