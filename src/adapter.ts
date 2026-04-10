@@ -83,6 +83,10 @@ export class SlackAdapter extends MessagingAdapter {
   private modalHandler = new SlackModalHandler();
   private sessionTrackers = new Map<string, SlackActivityTracker>();
   private _dispatchQueues = new Map<string, Promise<void>>();
+  /** Message `ts` of the skill commands card per session, for in-place edits */
+  private _skillCommandsTs = new Map<string, string>();
+  /** Commands queued before a session channel was ready */
+  private _pendingSkillCommands = new Map<string, AgentCommand[]>();
   private adapterDefaultOutputMode: OutputMode | undefined;
   private botUserId = "";
   private slackConfig: SlackChannelConfig;
@@ -832,6 +836,18 @@ export class SlackAdapter extends MessagingAdapter {
     }
   }
 
+  private formatSkillCommands(commands: AgentCommand[]): string {
+    if (commands.length === 0) return "_No commands available_";
+    const lines = ["*Available commands:*"];
+    for (const cmd of commands) {
+      const hint = (cmd as { description?: string }).description
+        ? ` — ${(cmd as { description?: string }).description}`
+        : "";
+      lines.push(`• \`/${cmd.name}\`${hint}`);
+    }
+    return lines.join("\n");
+  }
+
   // NOTE: Async flow — different from Telegram adapter.
   // Telegram: sendPermissionRequest awaits user response inline.
   // Slack: posts interactive buttons and returns immediately.
@@ -897,6 +913,78 @@ export class SlackAdapter extends MessagingAdapter {
   async stripTTSBlock(sessionId: string): Promise<void> {
     const buf = this.textBuffers.get(sessionId);
     if (buf) await buf.stripTtsBlock();
+  }
+
+  /**
+   * Post or update the skill commands card in the session channel.
+   * If the session channel is not yet ready, queues for later flush.
+   */
+  async sendSkillCommands(sessionId: string, commands: AgentCommand[]): Promise<void> {
+    const meta = this.sessions.get(sessionId);
+    if (!meta) {
+      // Channel not ready yet — queue and flush in flushPendingSkillCommands()
+      this._pendingSkillCommands.set(sessionId, commands);
+      return;
+    }
+
+    const text = this.formatSkillCommands(commands);
+    const existingTs = this._skillCommandsTs.get(sessionId);
+
+    try {
+      if (existingTs) {
+        await this.queue.enqueue("chat.update", {
+          channel: meta.channelId,
+          ts: existingTs,
+          text,
+          blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
+        });
+      } else {
+        const result = await this.queue.enqueue<{ ts?: string }>("chat.postMessage", {
+          channel: meta.channelId,
+          text,
+          blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
+        });
+        if (result?.ts) this._skillCommandsTs.set(sessionId, result.ts);
+      }
+    } catch (err) {
+      this.log.warn({ err, sessionId }, "Failed to post/update skill commands");
+    }
+  }
+
+  /**
+   * Update the skill commands card to "Session ended" and clear all tracking.
+   * Called by SessionBridge on session_end and error events.
+   */
+  async cleanupSkillCommands(sessionId: string): Promise<void> {
+    this._pendingSkillCommands.delete(sessionId);
+
+    const ts = this._skillCommandsTs.get(sessionId);
+    const meta = this.sessions.get(sessionId);
+    if (ts && meta) {
+      try {
+        await this.queue.enqueue("chat.update", {
+          channel: meta.channelId,
+          ts,
+          text: "_Session ended_",
+          blocks: [{ type: "section", text: { type: "mrkdwn", text: "_Session ended_" } }],
+        });
+      } catch (err) {
+        this.log.warn({ err, sessionId }, "Failed to cleanup skill commands card");
+      }
+    }
+
+    this._skillCommandsTs.delete(sessionId);
+  }
+
+  /**
+   * Flush any skill commands that were queued before the session channel was ready.
+   * Called after createSessionThread() makes the channel available.
+   */
+  async flushPendingSkillCommands(sessionId: string): Promise<void> {
+    const commands = this._pendingSkillCommands.get(sessionId);
+    if (!commands) return;
+    this._pendingSkillCommands.delete(sessionId);
+    await this.sendSkillCommands(sessionId, commands);
   }
 }
 
