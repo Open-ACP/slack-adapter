@@ -82,6 +82,7 @@ export class SlackAdapter extends MessagingAdapter {
   private outputModeResolver = new OutputModeResolver();
   private modalHandler = new SlackModalHandler();
   private sessionTrackers = new Map<string, SlackActivityTracker>();
+  private _dispatchQueues = new Map<string, Promise<void>>();
   private adapterDefaultOutputMode: OutputMode | undefined;
   private botUserId = "";
   private slackConfig: SlackChannelConfig;
@@ -643,7 +644,14 @@ export class SlackAdapter extends MessagingAdapter {
       this.log.warn({ sessionId }, "No Slack channel for session, skipping message");
       return;
     }
-    await super.sendMessage(sessionId, content);
+    // Serialize per session — SessionBridge fires sendMessage() fire-and-forget so
+    // concurrent events (tool_call, tool_update, text) can race without this queue.
+    const prev = this._dispatchQueues.get(sessionId) ?? Promise.resolve();
+    const next = prev
+      .then(() => super.sendMessage(sessionId, content))
+      .catch((err) => { this.log.warn({ err, sessionId }, "Dispatch queue error"); });
+    this._dispatchQueues.set(sessionId, next);
+    await next;
   }
 
   // --- Handler overrides (dispatched by base class) ---
@@ -652,11 +660,11 @@ export class SlackAdapter extends MessagingAdapter {
     const meta = this.getSessionMeta(sessionId);
     if (!meta) return;
 
-    // Finalize activity tracker (marks turn as done, updates main message)
+    // Seal tool card on first text chunk without marking the turn complete.
+    // finalize() is called later in handleSessionEnd when the turn truly ends.
     const tracker = this.sessionTrackers.get(sessionId);
-    if (tracker) await tracker.finalize();
+    if (tracker) await tracker.onTextStart();
 
-    // Post text in channel via text buffer (existing behavior)
     const buf = this.getTextBuffer(sessionId, meta.channelId);
     buf.append(content.text ?? "");
   }
