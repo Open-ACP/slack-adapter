@@ -562,8 +562,15 @@ export class SlackAdapter extends MessagingAdapter {
       // Render response as Slack message
       if (channelId) {
         let replyText = "";
+        let replyBlocks: unknown[] | undefined;
         if (response.type === "text") {
           replyText = response.text;
+        } else if (response.type === "adaptive") {
+          const variant = response.variants?.['slack'] as
+            | { text?: string; blocks?: unknown[] }
+            | undefined;
+          replyText = variant?.text ?? response.fallback;
+          replyBlocks = variant?.blocks;
         } else if (response.type === "error") {
           replyText = `⚠️ ${response.message}`;
         } else if (response.type === "menu") {
@@ -582,10 +589,11 @@ export class SlackAdapter extends MessagingAdapter {
           replyText = `${response.question}\nType \`${response.onYes}\` to confirm or \`${response.onNo}\` to cancel.`;
         }
 
-        if (replyText) {
+        if (replyText || replyBlocks) {
           await this.queue.enqueue("chat.postMessage", {
             channel: channelId,
             text: replyText,
+            ...(replyBlocks && { blocks: replyBlocks }),
           });
         }
       }
